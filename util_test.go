@@ -329,12 +329,12 @@ func TestKRandomNodesWithDelegate(t *testing.T) {
 			},
 		}
 
-		filterFunc := func(n *nodeState) bool {
+		excludeFunc := func(n *nodeState) bool {
 			return n.State != StateAlive
 		}
 
 		// Request 3 nodes
-		result := kRandomNodes(3, nodes, delegate, filterFunc)
+		result := kRandomNodes(3, nodes, delegate, excludeFunc)
 
 		// Should get up to 3 nodes
 		require.LessOrEqual(t, len(result), 3)
