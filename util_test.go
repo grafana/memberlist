@@ -495,6 +495,7 @@ func TestMakeCompoundMessages(t *testing.T) {
 					var got ackResp
 					require.NoError(t, decode(msg[1:], &got))
 
+					//nolint:staticcheck // reason: linter suggests a switch but we prefer to keep the code synced with upstream
 					if got.SeqNo == smallMsgSeqNo {
 						assert.Len(t, got.Payload, smallMsgPayloadLength)
 					} else if got.SeqNo == bigMsgSeqNo {
