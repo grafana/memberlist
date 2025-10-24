@@ -387,6 +387,46 @@ func TestKRandomNodesWithDelegate(t *testing.T) {
 			assert.Equal(t, StateAlive, node.State)
 		}
 	})
+
+	t.Run("all nodes selected and preferred with k equal to node count", func(t *testing.T) {
+		// Create a delegate that marks all alive nodes as both selected and preferred
+		delegate := &testNodeSelectionDelegate{
+			selectFunc: func(n Node) (selected, preferred bool) {
+				// All nodes are both selected and preferred
+				return true, true
+			},
+		}
+
+		excludeFunc := func(n *nodeState) bool {
+			return n.State != StateAlive
+		}
+
+		// Count alive nodes
+		aliveCount := 0
+		for _, node := range nodes {
+			if node.State == StateAlive {
+				aliveCount++
+			}
+		}
+
+		// Request exactly as many nodes as there are alive nodes
+		result := kRandomNodes(aliveCount, nodes, delegate, excludeFunc)
+
+		// Should get exactly all alive nodes
+		require.Equal(t, aliveCount, len(result))
+
+		// Verify all returned nodes are alive
+		for _, node := range result {
+			assert.Equal(t, StateAlive, node.State)
+		}
+
+		// Verify we got all unique nodes (no duplicates)
+		seen := make(map[string]bool)
+		for _, node := range result {
+			assert.False(t, seen[node.Name], "duplicate node: %s", node.Name)
+			seen[node.Name] = true
+		}
+	})
 }
 
 func TestMakeCompoundMessage(t *testing.T) {

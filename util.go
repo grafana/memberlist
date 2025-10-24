@@ -133,8 +133,9 @@ func kRandomNodes(k int, nodes []*nodeState, delegate NodeSelectionDelegate, exc
 	// Filter the nodes using the delegate. This allows downstream projects
 	// to implement custom routing logics (e.g. zone-aware gossiping).
 	if delegate != nil {
-		filteredNodes := make([]*nodeState, 0, len(nodes))
-		var preferredNodes []*nodeState
+		alloc := make([]*nodeState, 2*len(nodes))
+		filteredNodes := alloc[0:0:len(nodes)]
+		preferredNodes := alloc[len(nodes) : len(nodes) : 2*len(nodes)]
 
 		// Filter nodes by selected ones.
 		for _, node := range nodes {
