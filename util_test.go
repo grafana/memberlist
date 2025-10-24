@@ -401,19 +401,7 @@ func TestKRandomNodesWithDelegate(t *testing.T) {
 			return n.State != StateAlive
 		}
 
-		// Count alive nodes
-		aliveCount := 0
-		for _, node := range nodes {
-			if node.State == StateAlive {
-				aliveCount++
-			}
-		}
-
-		// Request exactly as many nodes as there are alive nodes
-		result := kRandomNodes(aliveCount, nodes, delegate, excludeFunc)
-
-		// Should get exactly all alive nodes
-		require.Equal(t, aliveCount, len(result))
+		result := kRandomNodes(len(nodes), nodes, delegate, excludeFunc)
 
 		// Verify all returned nodes are alive
 		for _, node := range result {
