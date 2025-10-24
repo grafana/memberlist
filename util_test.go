@@ -268,9 +268,9 @@ func TestKRandomNodes(t *testing.T) {
 		return false
 	}
 
-	s1 := kRandomNodes(3, nodes, filterFunc)
-	s2 := kRandomNodes(3, nodes, filterFunc)
-	s3 := kRandomNodes(3, nodes, filterFunc)
+	s1 := kRandomNodes(3, nodes, nil, filterFunc)
+	s2 := kRandomNodes(3, nodes, nil, filterFunc)
+	s3 := kRandomNodes(3, nodes, nil, filterFunc)
 
 	if reflect.DeepEqual(s1, s2) {
 		t.Fatalf("unexpected equal")
@@ -295,6 +295,126 @@ func TestKRandomNodes(t *testing.T) {
 			}
 		}
 	}
+}
+
+func TestKRandomNodesWithDelegate(t *testing.T) {
+	var nodes []*nodeState
+	for i := 0; i < 20; i++ {
+		state := StateAlive
+		switch i % 3 {
+		case 0:
+			state = StateAlive
+		case 1:
+			state = StateSuspect
+		case 2:
+			state = StateDead
+		}
+		nodes = append(nodes, &nodeState{
+			Node:  Node{Name: fmt.Sprintf("%d", i)},
+			State: state,
+		})
+	}
+
+	t.Run("with preferred nodes", func(t *testing.T) {
+		// Create a delegate that selects nodes 3, 6, 9, 12
+		// and prefers nodes 6 and 12
+		delegate := &testNodeSelectionDelegate{
+			selectFunc: func(n Node) (selected, preferred bool) {
+				switch n.Name {
+				case "3", "6", "9", "12":
+					selected = true
+					preferred = n.Name == "6" || n.Name == "12"
+				}
+				return
+			},
+		}
+
+		excludeFunc := func(n *nodeState) bool {
+			return n.State != StateAlive
+		}
+
+		// Request 3 nodes
+		result := kRandomNodes(3, nodes, delegate, excludeFunc)
+
+		// Should get up to 3 nodes
+		require.LessOrEqual(t, len(result), 3)
+		require.Greater(t, len(result), 0)
+
+		// At least one should be a preferred node
+		hasPreferred := false
+		for _, node := range result {
+			if node.Name == "6" || node.Name == "12" {
+				hasPreferred = true
+				break
+			}
+		}
+		assert.True(t, hasPreferred)
+
+		// All nodes should be in the selected set
+		for _, node := range result {
+			assert.Contains(t, []string{"3", "6", "9", "12"}, node.Name)
+			assert.Equal(t, StateAlive, node.State)
+		}
+	})
+
+	t.Run("with no preferred nodes", func(t *testing.T) {
+		// Create a delegate that selects nodes 3, 6, 9 but marks none as preferred
+		delegate := &testNodeSelectionDelegate{
+			selectFunc: func(n Node) (selected, preferred bool) {
+				switch n.Name {
+				case "3", "6", "9":
+					selected = true
+					preferred = false
+				}
+				return
+			},
+		}
+
+		filterFunc := func(n *nodeState) bool {
+			return n.State != StateAlive
+		}
+
+		// Request 2 nodes
+		result := kRandomNodes(2, nodes, delegate, filterFunc)
+
+		// Should get up to 2 nodes
+		require.LessOrEqual(t, len(result), 2)
+		require.Greater(t, len(result), 0)
+
+		// All should be in the selected set
+		for _, node := range result {
+			assert.Contains(t, []string{"3", "6", "9"}, node.Name)
+			assert.Equal(t, StateAlive, node.State)
+		}
+	})
+
+	t.Run("all nodes selected and preferred with k equal to node count", func(t *testing.T) {
+		// Create a delegate that marks all alive nodes as both selected and preferred
+		delegate := &testNodeSelectionDelegate{
+			selectFunc: func(n Node) (selected, preferred bool) {
+				// All nodes are both selected and preferred
+				return true, true
+			},
+		}
+
+		excludeFunc := func(n *nodeState) bool {
+			return n.State != StateAlive
+		}
+
+		result := kRandomNodes(len(nodes), nodes, delegate, excludeFunc)
+
+		// Verify all returned nodes are alive
+		for _, node := range result {
+			assert.Equal(t, StateAlive, node.State)
+		}
+
+		// Verify we got all unique nodes (no duplicates)
+		seen := make(map[string]bool)
+		for _, node := range result {
+			assert.False(t, seen[node.Name], "duplicate node: %s", node.Name)
+			seen[node.Name] = true
+		}
+	})
 }
 
 func TestMakeCompoundMessage(t *testing.T) {
@@ -387,6 +507,14 @@ func TestCompressDecompressPayload(t *testing.T) {
 	if !reflect.DeepEqual(decomp, []byte("testing")) {
 		t.Fatalf("bad payload: %v", decomp)
 	}
+}
+
+type testNodeSelectionDelegate struct {
+	selectFunc func(Node) (selected, preferred bool)
+}
+
+func (d *testNodeSelectionDelegate) SelectNode(n Node) (selected, preferred bool) {
+	return d.selectFunc(n)
 }
 
 func TestMakeCompoundMessages(t *testing.T) {
