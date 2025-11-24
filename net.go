@@ -234,9 +234,10 @@ func (m *Memberlist) streamListen() {
 
 // handleConn handles a single incoming stream connection from the transport.
 func (m *Memberlist) handleConn(conn net.Conn) {
-	defer func() {
+	defer func(conn net.Conn) {
 		_ = conn.Close()
-	}()
+	}(conn) // Capture the original conn, because the code before shadows it.
+
 	m.logger.Printf("[DEBUG] memberlist: Stream connection %s", LogConn(conn))
 
 	metrics.IncrCounterWithLabels([]string{"memberlist", "tcp", "accept"}, 1, m.metricLabels)
