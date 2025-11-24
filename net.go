@@ -234,10 +234,6 @@ func (m *Memberlist) streamListen() {
 
 // handleConn handles a single incoming stream connection from the transport.
 func (m *Memberlist) handleConn(conn net.Conn) {
-	defer func(conn net.Conn) {
-		_ = conn.Close()
-	}(conn) // Capture the original conn, because the code before shadows it.
-
 	m.logger.Printf("[DEBUG] memberlist: Stream connection %s", LogConn(conn))
 
 	metrics.IncrCounterWithLabels([]string{"memberlist", "tcp", "accept"}, 1, m.metricLabels)
@@ -249,12 +245,21 @@ func (m *Memberlist) handleConn(conn net.Conn) {
 	var (
 		streamLabel string
 		err         error
+		// Store the original conn, because the code below shadows it.
+		// If reading the label header from the stream fail, we should still close the connection.
+		origConn = conn
 	)
 	conn, streamLabel, err = RemoveLabelHeaderFromStream(conn)
 	if err != nil {
-		m.logger.Printf("[ERR] memberlist: failed to receive and remove the stream label header: %s %s", err, LogConn(conn))
+		m.logger.Printf("[ERR] memberlist: failed to receive and remove the stream label header: %s %s", err, LogConn(origConn))
+		_ = origConn.Close()
 		return
 	}
+
+	defer func() {
+		// Always close the wrapped connection, that we got after removing the label header.
+		_ = conn.Close()
+	}()
 
 	if m.config.SkipInboundLabelCheck {
 		// Set this from config so that the auth data assertions work below.
