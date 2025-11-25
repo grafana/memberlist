@@ -9,11 +9,12 @@ package memberlist
 // This delegate is not used for probes (health checks). When implementing zone-aware gossiping,
 // probes can bypass this delegate.
 type NodeSelectionDelegate interface {
-	// SelectNode is called for each node to determine:
-	// - selected: whether the node should be included in the selection pool
-	// - preferred: indicates whether the node should be prioritized. During a gossip cycle,
-	//              at least one preferred node is always selected. If no preferred nodes exist,
-	//              all gossip targets are chosen randomly from the nodes that have been marked
-	//              as "selected".
-	SelectNode(Node) (selected, preferred bool)
+	// SelectNodes is called with all candidate nodes to determine:
+	// - selected: the nodes that should be included in the selection pool
+	// - preferred: an optional single node that should be prioritized. During a gossip cycle,
+	//              the preferred node is always selected first if provided. If no preferred
+	//              node is returned, all gossip targets are chosen randomly from the selected nodes.
+	//
+	// The input slice may be modified in place and returned as the selected slice.
+	SelectNodes(nodes []*Node) (selected []*Node, preferred *Node)
 }

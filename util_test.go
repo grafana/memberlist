@@ -317,15 +317,22 @@ func TestKRandomNodesWithDelegate(t *testing.T) {
 
 	t.Run("with preferred nodes", func(t *testing.T) {
 		// Create a delegate that selects nodes 3, 6, 9, 12
-		// and prefers nodes 6 and 12
+		// and prefers nodes 6 or 12 (returns the first preferred found).
+		// Filters in place to test that modifying the input slice is safe.
 		delegate := &testNodeSelectionDelegate{
-			selectFunc: func(n Node) (selected, preferred bool) {
-				switch n.Name {
-				case "3", "6", "9", "12":
-					selected = true
-					preferred = n.Name == "6" || n.Name == "12"
+			selectFunc: func(nodes []*Node) (selected []*Node, preferred *Node) {
+				w := 0
+				for _, n := range nodes {
+					switch n.Name {
+					case "3", "6", "9", "12":
+						nodes[w] = n
+						w++
+						if preferred == nil && (n.Name == "6" || n.Name == "12") {
+							preferred = n
+						}
+					}
 				}
-				return
+				return nodes[:w], preferred
 			},
 		}
 
@@ -358,15 +365,19 @@ func TestKRandomNodesWithDelegate(t *testing.T) {
 	})
 
 	t.Run("with no preferred nodes", func(t *testing.T) {
-		// Create a delegate that selects nodes 3, 6, 9 but marks none as preferred
+		// Create a delegate that selects nodes 3, 6, 9 but returns no preferred.
+		// Filters in place to test that modifying the input slice is safe.
 		delegate := &testNodeSelectionDelegate{
-			selectFunc: func(n Node) (selected, preferred bool) {
-				switch n.Name {
-				case "3", "6", "9":
-					selected = true
-					preferred = false
+			selectFunc: func(nodes []*Node) (selected []*Node, preferred *Node) {
+				w := 0
+				for _, n := range nodes {
+					switch n.Name {
+					case "3", "6", "9":
+						nodes[w] = n
+						w++
+					}
 				}
-				return
+				return nodes[:w], nil
 			},
 		}
 
@@ -389,11 +400,14 @@ func TestKRandomNodesWithDelegate(t *testing.T) {
 	})
 
 	t.Run("all nodes selected and preferred with k equal to node count", func(t *testing.T) {
-		// Create a delegate that marks all alive nodes as both selected and preferred
+		// Create a delegate that selects all nodes and returns the first as preferred
 		delegate := &testNodeSelectionDelegate{
-			selectFunc: func(n Node) (selected, preferred bool) {
-				// All nodes are both selected and preferred
-				return true, true
+			selectFunc: func(nodes []*Node) (selected []*Node, preferred *Node) {
+				selected = nodes
+				if len(nodes) > 0 {
+					preferred = nodes[0]
+				}
+				return
 			},
 		}
 
@@ -510,11 +524,11 @@ func TestCompressDecompressPayload(t *testing.T) {
 }
 
 type testNodeSelectionDelegate struct {
-	selectFunc func(Node) (selected, preferred bool)
+	selectFunc func([]*Node) (selected []*Node, preferred *Node)
 }
 
-func (d *testNodeSelectionDelegate) SelectNode(n Node) (selected, preferred bool) {
-	return d.selectFunc(n)
+func (d *testNodeSelectionDelegate) SelectNodes(nodes []*Node) ([]*Node, *Node) {
+	return d.selectFunc(nodes)
 }
 
 func TestMakeCompoundMessages(t *testing.T) {

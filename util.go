@@ -130,70 +130,47 @@ func moveDeadNodes(nodes []*nodeState, gossipToTheDeadTime time.Duration) int {
 func kRandomNodes(k int, nodes []*nodeState, delegate NodeSelectionDelegate, exclude func(*nodeState) bool) []Node {
 	kNodes := make([]Node, 0, k)
 
-	// Filter the nodes using the delegate. This allows downstream projects
-	// to implement custom routing logics (e.g. zone-aware gossiping).
-	if delegate != nil {
-		alloc := make([]*nodeState, 2*len(nodes))
-		filteredNodes := alloc[0:0:len(nodes)]
-		preferredNodes := alloc[len(nodes) : len(nodes) : 2*len(nodes)]
-
-		// Filter nodes by selected ones.
-		for _, node := range nodes {
-			selected, preferred := delegate.SelectNode(node.Node)
-			if selected {
-				filteredNodes = append(filteredNodes, node)
-			}
-			if selected && preferred {
-				preferredNodes = append(preferredNodes, node)
-			}
+	// Apply exclude filter first.
+	filteredNodes := make([]*Node, 0, len(nodes))
+	for _, node := range nodes {
+		if exclude != nil && exclude(node) {
+			continue
 		}
+		filteredNodes = append(filteredNodes, &node.Node)
+	}
 
-		nodes = filteredNodes
+	// Filter the nodes using the delegate. This allows downstream projects
+	// to implement custom routing logics (e.g. zone-aware routing).
+	var preferred *Node
+	if delegate != nil {
+		filteredNodes, preferred = delegate.SelectNodes(filteredNodes)
 
-		// Select 1 random preferred node first to guarantee at least one preferred node in the result set.
-		if n := len(preferredNodes); n > 0 && k > 0 {
-			startIdx := randomOffset(n)
-
-			for i := 0; i < n; i++ {
-				idx := (startIdx + i) % n
-				state := preferredNodes[idx]
-
-				// Ensure it's not excluded by the filter.
-				if exclude != nil && exclude(state) {
-					continue
-				}
-
-				kNodes = append(kNodes, state.Node)
-				break
-			}
+		// Add preferred node first if provided.
+		if preferred != nil && k > 0 {
+			kNodes = append(kNodes, *preferred)
 		}
 	}
 
-	n := len(nodes)
+	n := len(filteredNodes)
 
 OUTER:
 	// Probe up to 3*n times, with large n this is not necessary
 	// since k << n, but with small n we want search to be
 	// exhaustive
 	for i := 0; i < 3*n && len(kNodes) < k; i++ {
-		// Get random nodeState
+		// Get random node
 		idx := randomOffset(n)
-		state := nodes[idx]
-
-		// Give the filter a shot at it.
-		if exclude != nil && exclude(state) {
-			continue OUTER
-		}
+		node := filteredNodes[idx]
 
 		// Check if we have this node already
 		for j := 0; j < len(kNodes); j++ {
-			if state.Name == kNodes[j].Name {
+			if node.Name == kNodes[j].Name {
 				continue OUTER
 			}
 		}
 
 		// Append the node
-		kNodes = append(kNodes, state.Node)
+		kNodes = append(kNodes, *node)
 	}
 	return kNodes
 }
