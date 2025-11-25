@@ -17,8 +17,9 @@ import (
 	"time"
 
 	metrics "github.com/hashicorp/go-metrics/compat"
-	iretry "github.com/hashicorp/memberlist/internal/retry"
 	"github.com/stretchr/testify/require"
+
+	iretry "github.com/hashicorp/memberlist/internal/retry"
 )
 
 func HostMemberlist(host string, t *testing.T, f func(*Config)) *Memberlist {
@@ -2442,60 +2443,127 @@ func TestMemberlist_FailedRemote(t *testing.T) {
 }
 
 func TestMemberlist_PushPull(t *testing.T) {
-	addr1 := getBindAddr()
-	addr2 := getBindAddr()
-	ip1 := []byte(addr1)
-	ip2 := []byte(addr2)
+	tests := []struct {
+		name          string
+		pushPullNodes int
+		numPeers      int
+	}{
+		{
+			name:          "single node push/pull (default)",
+			pushPullNodes: 1,
+			numPeers:      1,
+		},
+		{
+			name:          "multiple nodes push/pull",
+			pushPullNodes: 2,
+			numPeers:      2,
+		},
+	}
 
-	sink := registerInMemorySink(t)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sink := registerInMemorySink(t)
 
-	ch := make(chan NodeEvent, 3)
+			// Create channels for each peer node
+			channels := make([]chan NodeEvent, tt.numPeers)
+			for i := 0; i < tt.numPeers; i++ {
+				channels[i] = make(chan NodeEvent, 3)
+			}
 
-	m1 := HostMemberlist(addr1.String(), t, func(c *Config) {
-		c.GossipInterval = 10 * time.Second
-		c.PushPullInterval = time.Millisecond
-	})
-	defer func() {
-		if err := m1.Shutdown(); err != nil {
-			t.Fatal(err)
-		}
-	}()
+			// Create m1 (the node doing push/pull) - uses localhost with port 0 (auto-assigned)
+			m1 := HostMemberlist("127.0.0.1", t, func(c *Config) {
+				c.Name = "node1"
+				c.BindPort = 0 // Let OS assign a free port
+				c.GossipInterval = 10 * time.Second
+				c.PushPullInterval = time.Millisecond
 
-	bindPort := m1.config.BindPort
+				// Configure m1 to always push/pull to/from all peers.
+				c.PushPullNodes = tt.pushPullNodes
+			})
+			defer func() {
+				if err := m1.Shutdown(); err != nil {
+					t.Fatal(err)
+				}
+			}()
 
-	m2 := HostMemberlist(addr2.String(), t, func(c *Config) {
-		c.BindPort = bindPort
-		c.GossipInterval = 10 * time.Second
-		c.Events = &ChannelEventDelegate{ch}
-	})
-	defer func() {
-		if err := m2.Shutdown(); err != nil {
-			t.Fatal(err)
-		}
-	}()
+			m1Addr := []byte(net.ParseIP("127.0.0.1"))
+			m1Port := uint16(m1.config.BindPort)
 
-	a1 := alive{Node: addr1.String(), Addr: ip1, Port: uint16(bindPort), Incarnation: 1, Vsn: m1.config.BuildVsnArray()}
-	m1.aliveNode(&a1, nil, true)
-	a2 := alive{Node: addr2.String(), Addr: ip2, Port: uint16(bindPort), Incarnation: 1, Vsn: m2.config.BuildVsnArray()}
-	m1.aliveNode(&a2, nil, false)
+			// Create peer nodes - each gets its own port on localhost
+			peers := make([]*Memberlist, tt.numPeers)
+			peerAddrs := make([][]byte, tt.numPeers)
+			peerPorts := make([]uint16, tt.numPeers)
 
-	// Gossip should send all this to m2. It's UDP though so retry a few times
-	retry(t, 5, 10*time.Millisecond, func(failf func(string, ...interface{})) {
-		m1.pushPull()
+			for i := 0; i < tt.numPeers; i++ {
+				ch := channels[i]
+				nodeName := fmt.Sprintf("node%d", i+2)
+				peers[i] = HostMemberlist("127.0.0.1", t, func(c *Config) {
+					c.Name = nodeName
+					c.BindPort = 0 // Let OS assign a free port
+					c.GossipInterval = 10 * time.Second
+					c.Events = &ChannelEventDelegate{ch}
+				})
+				defer func(m *Memberlist) {
+					if err := m.Shutdown(); err != nil {
+						t.Fatal(err)
+					}
+				}(peers[i])
 
-		time.Sleep(3 * time.Millisecond)
+				peerAddrs[i] = net.ParseIP("127.0.0.1")
+				peerPorts[i] = uint16(peers[i].config.BindPort)
+			}
 
-		if len(ch) < 2 {
-			failf("expected 2 messages from pushPull")
-		}
+			// Register m1 as alive
+			a1 := alive{Node: m1.config.Name, Addr: m1Addr, Port: m1Port, Incarnation: 1, Vsn: m1.config.BuildVsnArray()}
+			m1.aliveNode(&a1, nil, true)
 
-		instancesMetricName := "consul.usage.test.memberlist.node.instances"
-		verifyGaugeExists(t, "consul.usage.test.memberlist.size.local", sink)
-		verifyGaugeExists(t, fmt.Sprintf("%s;node_state=%s", instancesMetricName, StateAlive.metricsString()), sink)
-		verifyGaugeExists(t, fmt.Sprintf("%s;node_state=%s", instancesMetricName, StateDead.metricsString()), sink)
-		verifyGaugeExists(t, fmt.Sprintf("%s;node_state=%s", instancesMetricName, StateLeft.metricsString()), sink)
-		verifyGaugeExists(t, fmt.Sprintf("%s;node_state=%s", instancesMetricName, StateSuspect.metricsString()), sink)
-	})
+			// Register all peer nodes as alive in m1
+			for i := 0; i < tt.numPeers; i++ {
+				a := alive{Node: peers[i].config.Name, Addr: peerAddrs[i], Port: peerPorts[i], Incarnation: 1, Vsn: peers[i].config.BuildVsnArray()}
+				m1.aliveNode(&a, nil, false)
+			}
+
+			// Perform push/pull once, then use retry to wait for events to arrive
+			m1.pushPull()
+
+			retry(t, 5, 10*time.Millisecond, func(failf func(string, ...interface{})) {
+				// Each peer that receives push/pull gets join events for ALL nodes m1 knows about.
+				// m1 knows: [node1 (itself), node2, node3, ...] = 1 + numPeers nodes
+				// When pushed to a peer, that peer learns about all of them.
+				// Expected events per peer = numPeers + 1 (m1 + all other peers)
+				expectedEventsPerPeer := tt.numPeers + 1
+
+				// Track which peers received push/pull and validate each
+				totalEvents := 0
+				peersWithEvents := 0
+				for i := 0; i < tt.numPeers; i++ {
+					numEvents := len(channels[i])
+					if numEvents > 0 {
+						peersWithEvents++
+						totalEvents += numEvents
+
+						// Each participating peer must receive at least expectedEventsPerPeer
+						if numEvents < expectedEventsPerPeer {
+							failf("peer node%d: expected at least %d events, got %d", i+2, expectedEventsPerPeer, numEvents) // +2 because nodes are node1, node2, node3
+						}
+					}
+				}
+
+				// Verify correct number of peers participated in push/pull
+				if peersWithEvents < tt.pushPullNodes {
+					failf("expected all peers to receive push/pull, but %d peers got events", tt.pushPullNodes, peersWithEvents)
+				}
+
+				// Verify metrics
+				instancesMetricName := "consul.usage.test.memberlist.node.instances"
+				verifyGaugeExists(t, "consul.usage.test.memberlist.size.local", sink)
+				verifyGaugeExists(t, fmt.Sprintf("%s;node_state=%s", instancesMetricName, StateAlive.metricsString()), sink)
+				verifyGaugeExists(t, fmt.Sprintf("%s;node_state=%s", instancesMetricName, StateDead.metricsString()), sink)
+				verifyGaugeExists(t, fmt.Sprintf("%s;node_state=%s", instancesMetricName, StateLeft.metricsString()), sink)
+				verifyGaugeExists(t, fmt.Sprintf("%s;node_state=%s", instancesMetricName, StateSuspect.metricsString()), sink)
+			})
+		})
+	}
 }
 
 func TestVerifyProtocol(t *testing.T) {
