@@ -15,7 +15,7 @@ type NodeSelectionDelegate interface {
 	// - preferred: an optional single node that should be prioritized. During a gossip cycle,
 	//              the preferred node is always included if present. If nil, all gossip targets
 	//              are chosen randomly from the selected nodes.
-	//
+	//              It is not necessary to include the preferred node in the selected ones nor to explicitly remove it from them.
 	// The input NodeState slice cannot be manipulated in-place, but if all input nodes are selected
 	// then it's safe to return the input slice as is.
 	//
