@@ -130,7 +130,7 @@ func moveDeadNodes(nodes []*nodeState, gossipToTheDeadTime time.Duration) int {
 func kRandomNodes(k int, nodes []*nodeState, delegate NodeSelectionDelegate, exclude func(*nodeState) bool) []Node {
 	kNodes := make([]Node, 0, k)
 
-	// Apply exclude filter first.
+	// Apply the exclude filter first.
 	filteredNodes := make([]*Node, 0, len(nodes))
 	for _, node := range nodes {
 		if exclude != nil && exclude(node) {
@@ -141,11 +141,11 @@ func kRandomNodes(k int, nodes []*nodeState, delegate NodeSelectionDelegate, exc
 
 	// Filter the nodes using the delegate. This allows downstream projects
 	// to implement custom routing logics (e.g. zone-aware routing).
-	var preferred *Node
 	if delegate != nil {
+		var preferred *Node
 		filteredNodes, preferred = delegate.SelectNodes(filteredNodes)
 
-		// Add preferred node first if provided.
+		// Add the preferred node first, if provided.
 		if preferred != nil && k > 0 {
 			kNodes = append(kNodes, *preferred)
 		}
