@@ -516,7 +516,7 @@ func TestTCPPushPull(t *testing.T) {
 		}
 	}()
 
-	m.nodes = append(m.nodes, &nodeState{
+	m.nodes = append(m.nodes, &NodeState{
 		Node: Node{
 			Name: "Test 0",
 			Addr: net.ParseIP(m.config.BindAddr),
@@ -843,7 +843,7 @@ func TestRawSendUdp_CRC(t *testing.T) {
 	}
 
 	// Register a node with PMax >= 5 to be looked up, should result in a checksum
-	m.nodeMap["127.0.0.1"] = &nodeState{
+	m.nodeMap["127.0.0.1"] = &NodeState{
 		Node: Node{PMax: 5},
 	}
 	if err := m.rawSendMsgPacket(a, nil, payload); err != nil {
