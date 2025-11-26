@@ -22,14 +22,22 @@ import (
 	iretry "github.com/hashicorp/memberlist/internal/retry"
 )
 
+var hostNum uint32 = 0
+var hostLock sync.Mutex
+
 func HostMemberlist(host string, t *testing.T, f func(*Config)) *Memberlist {
 	t.Helper()
 
+	hostLock.Lock()
+	hostNum++
+	name := fmt.Sprintf("host-%d", hostNum)
+	hostLock.Unlock()
+
 	c := DefaultLANConfig()
-	c.Name = host
-	c.BindAddr = host
+	c.Name = name
+	c.BindAddr = "127.0.0.1"
 	c.BindPort = 0 // choose a free port
-	c.Logger = log.New(os.Stderr, host, log.LstdFlags)
+	c.Logger = log.New(os.Stderr, name+" ", log.LstdFlags)
 	if f != nil {
 		f(c)
 	}
@@ -42,10 +50,7 @@ func HostMemberlist(host string, t *testing.T, f func(*Config)) *Memberlist {
 }
 
 func TestMemberList_Probe(t *testing.T) {
-	addr1 := getBindAddr()
-	addr2 := getBindAddr()
-
-	m1 := HostMemberlist(addr1.String(), t, func(c *Config) {
+	m1 := HostMemberlist("", t, func(c *Config) {
 		c.ProbeTimeout = time.Millisecond
 		c.ProbeInterval = 10 * time.Millisecond
 	})
@@ -55,39 +60,36 @@ func TestMemberList_Probe(t *testing.T) {
 		}
 	}()
 
-	bindPort := m1.config.BindPort
-
-	m2 := HostMemberlist(addr2.String(), t, func(c *Config) {
-		c.BindPort = bindPort
-	})
+	m2 := HostMemberlist("", t, nil)
 	defer func() {
 		if err := m2.Shutdown(); err != nil {
 			t.Fatal(err)
 		}
 	}()
 
+	ip := net.ParseIP(m1.config.BindAddr)
 	a1 := alive{
-		Node:        addr1.String(),
-		Addr:        []byte(addr1),
+		Node:        m1.config.Name,
+		Addr:        []byte(ip.To4()),
 		Port:        uint16(m1.config.BindPort),
 		Incarnation: 1,
 		Vsn:         m1.config.BuildVsnArray(),
 	}
 	m1.aliveNode(&a1, nil, true)
 	a2 := alive{
-		Node:        addr2.String(),
-		Addr:        []byte(addr2),
+		Node:        m2.config.Name,
+		Addr:        []byte(ip.To4()),
 		Port:        uint16(m2.config.BindPort),
 		Incarnation: 1,
 		Vsn:         m2.config.BuildVsnArray(),
 	}
 	m1.aliveNode(&a2, nil, false)
 
-	// should ping addr2
+	// should ping m2
 	m1.probe()
 
 	// Should not be marked suspect
-	n := m1.nodeMap[addr2.String()]
+	n := m1.nodeMap[m2.config.Name]
 	if n.State != StateAlive {
 		t.Fatalf("Expect node to be alive")
 	}
@@ -99,16 +101,7 @@ func TestMemberList_Probe(t *testing.T) {
 }
 
 func TestMemberList_ProbeNode_Suspect(t *testing.T) {
-	addr1 := getBindAddr()
-	addr2 := getBindAddr()
-	addr3 := getBindAddr()
-	addr4 := getBindAddr()
-	ip1 := []byte(addr1)
-	ip2 := []byte(addr2)
-	ip3 := []byte(addr3)
-	ip4 := []byte(addr4)
-
-	m1 := HostMemberlist(addr1.String(), t, func(c *Config) {
+	m1 := HostMemberlist("", t, func(c *Config) {
 		c.ProbeTimeout = time.Millisecond
 		c.ProbeInterval = 10 * time.Millisecond
 	})
@@ -118,34 +111,31 @@ func TestMemberList_ProbeNode_Suspect(t *testing.T) {
 		}
 	}()
 
-	bindPort := m1.config.BindPort
-
-	m2 := HostMemberlist(addr2.String(), t, func(c *Config) {
-		c.BindPort = bindPort
-	})
+	m2 := HostMemberlist("", t, nil)
 	defer func() {
 		if err := m2.Shutdown(); err != nil {
 			t.Fatal(err)
 		}
 	}()
-	m3 := HostMemberlist(addr3.String(), t, func(c *Config) {
-		c.BindPort = bindPort
-	})
+	m3 := HostMemberlist("", t, nil)
 	defer func() {
 		if err := m3.Shutdown(); err != nil {
 			t.Fatal(err)
 		}
 	}()
-	a1 := alive{Node: addr1.String(), Addr: ip1, Port: uint16(bindPort), Incarnation: 1, Vsn: m1.config.BuildVsnArray()}
+
+	ip := net.ParseIP(m1.config.BindAddr).To4()
+	a1 := alive{Node: m1.config.Name, Addr: ip, Port: uint16(m1.config.BindPort), Incarnation: 1, Vsn: m1.config.BuildVsnArray()}
 	m1.aliveNode(&a1, nil, true)
-	a2 := alive{Node: addr2.String(), Addr: ip2, Port: uint16(bindPort), Incarnation: 1, Vsn: m2.config.BuildVsnArray()}
+	a2 := alive{Node: m2.config.Name, Addr: ip, Port: uint16(m2.config.BindPort), Incarnation: 1, Vsn: m2.config.BuildVsnArray()}
 	m1.aliveNode(&a2, nil, false)
-	a3 := alive{Node: addr3.String(), Addr: ip3, Port: uint16(bindPort), Incarnation: 1, Vsn: m3.config.BuildVsnArray()}
+	a3 := alive{Node: m3.config.Name, Addr: ip, Port: uint16(m3.config.BindPort), Incarnation: 1, Vsn: m3.config.BuildVsnArray()}
 	m1.aliveNode(&a3, nil, false)
-	a4 := alive{Node: addr4.String(), Addr: ip4, Port: uint16(bindPort), Incarnation: 1, Vsn: m1.config.BuildVsnArray()}
+	// Node 4 is fake - doesn't exist, should become suspect
+	a4 := alive{Node: "fake-node", Addr: ip, Port: uint16(12345), Incarnation: 1, Vsn: m1.config.BuildVsnArray()}
 	m1.aliveNode(&a4, nil, false)
 
-	n := m1.nodeMap[addr4.String()]
+	n := m1.nodeMap["fake-node"]
 	m1.probeNode(n)
 
 	// Should be marked suspect.
@@ -181,9 +171,7 @@ func TestMemberList_ProbeNode_Suspect_Dogpile(t *testing.T) {
 	for i, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			// Create the main memberlist under test.
-			addr := getBindAddr()
-
-			m := HostMemberlist(addr.String(), t, func(c *Config) {
+			m := HostMemberlist("", t, func(c *Config) {
 				c.ProbeTimeout = time.Millisecond
 				c.ProbeInterval = 100 * time.Millisecond
 				c.SuspicionMult = 5
@@ -195,19 +183,14 @@ func TestMemberList_ProbeNode_Suspect_Dogpile(t *testing.T) {
 				}
 			}()
 
-			bindPort := m.config.BindPort
-
-			a := alive{Node: addr.String(), Addr: []byte(addr), Port: uint16(bindPort), Incarnation: 1, Vsn: m.config.BuildVsnArray()}
+			ip := net.ParseIP(m.config.BindAddr).To4()
+			a := alive{Node: m.config.Name, Addr: ip, Port: uint16(m.config.BindPort), Incarnation: 1, Vsn: m.config.BuildVsnArray()}
 			m.aliveNode(&a, nil, true)
 
 			// Make all but one peer be an real, alive instance.
 			var peers []*Memberlist
 			for j := 0; j < c.numPeers-1; j++ {
-				peerAddr := getBindAddr()
-
-				peer := HostMemberlist(peerAddr.String(), t, func(c *Config) {
-					c.BindPort = bindPort
-				})
+				peer := HostMemberlist("", t, nil)
 				defer func() {
 					if err := peer.Shutdown(); err != nil {
 						t.Fatal(err)
@@ -217,27 +200,27 @@ func TestMemberList_ProbeNode_Suspect_Dogpile(t *testing.T) {
 				//nolint:staticcheck // reason: peers used later indirectly
 				peers = append(peers, peer)
 
-				a = alive{Node: peerAddr.String(), Addr: []byte(peerAddr), Port: uint16(bindPort), Incarnation: 1, Vsn: m.config.BuildVsnArray()}
+				a = alive{Node: peer.config.Name, Addr: ip, Port: uint16(peer.config.BindPort), Incarnation: 1, Vsn: m.config.BuildVsnArray()}
 				m.aliveNode(&a, nil, false)
 			}
 
-			// Just use a bogus address for the last peer so it doesn't respond
+			// Just use a bogus name for the last peer so it doesn't respond
 			// to pings, but tell the memberlist it's alive.
-			badPeerAddr := getBindAddr()
-			a = alive{Node: badPeerAddr.String(), Addr: []byte(badPeerAddr), Port: uint16(bindPort), Incarnation: 1, Vsn: m.config.BuildVsnArray()}
+			badPeerName := "fake-bad-peer"
+			a = alive{Node: badPeerName, Addr: ip, Port: uint16(12345), Incarnation: 1, Vsn: m.config.BuildVsnArray()}
 			m.aliveNode(&a, nil, false)
 
 			// Force a probe, which should start us into the suspect state.
-			m.probeNodeByAddr(badPeerAddr.String())
+			m.probeNodeByAddr(badPeerName)
 
-			if m.getNodeState(badPeerAddr.String()) != StateSuspect {
+			if m.getNodeState(badPeerName) != StateSuspect {
 				t.Fatalf("case %d: expected node to be suspect", i)
 			}
 
 			// Add the requested number of confirmations.
 			for j := 0; j < c.confirmations; j++ {
 				from := fmt.Sprintf("peer%d", j)
-				s := suspect{Node: badPeerAddr.String(), Incarnation: 1, From: from}
+				s := suspect{Node: badPeerName, Incarnation: 1, From: from}
 				m.suspectNode(&s)
 			}
 
@@ -246,7 +229,7 @@ func TestMemberList_ProbeNode_Suspect_Dogpile(t *testing.T) {
 			fudge := 25 * time.Millisecond
 			time.Sleep(c.expected - fudge)
 
-			if m.getNodeState(badPeerAddr.String()) != StateSuspect {
+			if m.getNodeState(badPeerName) != StateSuspect {
 				t.Fatalf("case %d: expected node to still be suspect", i)
 			}
 
@@ -254,7 +237,7 @@ func TestMemberList_ProbeNode_Suspect_Dogpile(t *testing.T) {
 			// timer fires.
 			time.Sleep(2 * fudge)
 
-			if m.getNodeState(badPeerAddr.String()) != StateDead {
+			if m.getNodeState(badPeerName) != StateDead {
 				t.Fatalf("case %d: expected node to be dead", i)
 			}
 		})
@@ -583,17 +566,8 @@ func TestMemberList_ProbeNode_FallbackTCP_OldProtocol(t *testing.T) {
 */
 
 func TestMemberList_ProbeNode_Awareness_Degraded(t *testing.T) {
-	addr1 := getBindAddr()
-	addr2 := getBindAddr()
-	addr3 := getBindAddr()
-	addr4 := getBindAddr()
-	ip1 := []byte(addr1)
-	ip2 := []byte(addr2)
-	ip3 := []byte(addr3)
-	ip4 := []byte(addr4)
-
 	var probeTimeMin time.Duration
-	m1 := HostMemberlist(addr1.String(), t, func(c *Config) {
+	m1 := HostMemberlist("", t, func(c *Config) {
 		c.ProbeTimeout = 10 * time.Millisecond
 		c.ProbeInterval = 200 * time.Millisecond
 		probeTimeMin = 2*c.ProbeInterval - 50*time.Millisecond
@@ -604,10 +578,7 @@ func TestMemberList_ProbeNode_Awareness_Degraded(t *testing.T) {
 		}
 	}()
 
-	bindPort := m1.config.BindPort
-
-	m2 := HostMemberlist(addr2.String(), t, func(c *Config) {
-		c.BindPort = bindPort
+	m2 := HostMemberlist("", t, func(c *Config) {
 		c.ProbeTimeout = 10 * time.Millisecond
 		c.ProbeInterval = 200 * time.Millisecond
 	})
@@ -617,8 +588,7 @@ func TestMemberList_ProbeNode_Awareness_Degraded(t *testing.T) {
 		}
 	}()
 
-	m3 := HostMemberlist(addr3.String(), t, func(c *Config) {
-		c.BindPort = bindPort
+	m3 := HostMemberlist("", t, func(c *Config) {
 		c.ProbeTimeout = 10 * time.Millisecond
 		c.ProbeInterval = 200 * time.Millisecond
 	})
@@ -628,19 +598,21 @@ func TestMemberList_ProbeNode_Awareness_Degraded(t *testing.T) {
 		}
 	}()
 
-	a1 := alive{Node: addr1.String(), Addr: ip1, Port: uint16(bindPort), Incarnation: 1, Vsn: m1.config.BuildVsnArray()}
+	ip := net.ParseIP(m1.config.BindAddr).To4()
+	a1 := alive{Node: m1.config.Name, Addr: ip, Port: uint16(m1.config.BindPort), Incarnation: 1, Vsn: m1.config.BuildVsnArray()}
 	m1.aliveNode(&a1, nil, true)
-	a2 := alive{Node: addr2.String(), Addr: ip2, Port: uint16(bindPort), Incarnation: 1, Vsn: m2.config.BuildVsnArray()}
+	a2 := alive{Node: m2.config.Name, Addr: ip, Port: uint16(m2.config.BindPort), Incarnation: 1, Vsn: m2.config.BuildVsnArray()}
 	m1.aliveNode(&a2, nil, false)
-	a3 := alive{Node: addr3.String(), Addr: ip3, Port: uint16(bindPort), Incarnation: 1, Vsn: m3.config.BuildVsnArray()}
+	a3 := alive{Node: m3.config.Name, Addr: ip, Port: uint16(m3.config.BindPort), Incarnation: 1, Vsn: m3.config.BuildVsnArray()}
 	m1.aliveNode(&a3, nil, false)
 
 	vsn4 := []uint8{
 		ProtocolVersionMin, ProtocolVersionMax, ProtocolVersionMin,
 		1, 1, 1,
 	}
-	// Node 4 never gets started.
-	a4 := alive{Node: addr4.String(), Addr: ip4, Port: uint16(bindPort), Incarnation: 1, Vsn: vsn4}
+	// Node 4 never gets started (fake node).
+	fakeNodeName := "fake-node-4"
+	a4 := alive{Node: fakeNodeName, Addr: ip, Port: uint16(12345), Incarnation: 1, Vsn: vsn4}
 	m1.aliveNode(&a4, nil, false)
 
 	// Start the health in a degraded state.
@@ -649,8 +621,8 @@ func TestMemberList_ProbeNode_Awareness_Degraded(t *testing.T) {
 		t.Fatalf("bad: %d", score)
 	}
 
-	// Have node m1 probe m4.
-	n := m1.nodeMap[addr4.String()]
+	// Have node m1 probe the fake node.
+	n := m1.nodeMap[fakeNodeName]
 	startProbe := time.Now()
 	m1.probeNode(n)
 	probeTime := time.Since(startProbe)
@@ -679,16 +651,7 @@ func TestMemberList_ProbeNode_Awareness_Degraded(t *testing.T) {
 }
 
 func TestMemberList_ProbeNode_Wrong_VSN(t *testing.T) {
-	addr1 := getBindAddr()
-	addr2 := getBindAddr()
-	addr3 := getBindAddr()
-	addr4 := getBindAddr()
-	ip1 := []byte(addr1)
-	ip2 := []byte(addr2)
-	ip3 := []byte(addr3)
-	ip4 := []byte(addr4)
-
-	m1 := HostMemberlist(addr1.String(), t, func(c *Config) {
+	m1 := HostMemberlist("", t, func(c *Config) {
 		c.ProbeTimeout = 10 * time.Millisecond
 		c.ProbeInterval = 200 * time.Millisecond
 	})
@@ -698,10 +661,7 @@ func TestMemberList_ProbeNode_Wrong_VSN(t *testing.T) {
 		}
 	}()
 
-	bindPort := m1.config.BindPort
-
-	m2 := HostMemberlist(addr2.String(), t, func(c *Config) {
-		c.BindPort = bindPort
+	m2 := HostMemberlist("", t, func(c *Config) {
 		c.ProbeTimeout = 10 * time.Millisecond
 		c.ProbeInterval = 200 * time.Millisecond
 	})
@@ -711,8 +671,7 @@ func TestMemberList_ProbeNode_Wrong_VSN(t *testing.T) {
 		}
 	}()
 
-	m3 := HostMemberlist(addr3.String(), t, func(c *Config) {
-		c.BindPort = bindPort
+	m3 := HostMemberlist("", t, func(c *Config) {
 		c.ProbeTimeout = 10 * time.Millisecond
 		c.ProbeInterval = 200 * time.Millisecond
 	})
@@ -722,19 +681,21 @@ func TestMemberList_ProbeNode_Wrong_VSN(t *testing.T) {
 		}
 	}()
 
-	a1 := alive{Node: addr1.String(), Addr: ip1, Port: uint16(bindPort), Incarnation: 1, Vsn: m1.config.BuildVsnArray()}
+	ip := net.ParseIP(m1.config.BindAddr).To4()
+	a1 := alive{Node: m1.config.Name, Addr: ip, Port: uint16(m1.config.BindPort), Incarnation: 1, Vsn: m1.config.BuildVsnArray()}
 	m1.aliveNode(&a1, nil, true)
-	a2 := alive{Node: addr2.String(), Addr: ip2, Port: uint16(bindPort), Incarnation: 1, Vsn: m2.config.BuildVsnArray()}
+	a2 := alive{Node: m2.config.Name, Addr: ip, Port: uint16(m2.config.BindPort), Incarnation: 1, Vsn: m2.config.BuildVsnArray()}
 	m1.aliveNode(&a2, nil, false)
-	a3 := alive{Node: addr3.String(), Addr: ip3, Port: uint16(bindPort), Incarnation: 1, Vsn: m3.config.BuildVsnArray()}
+	a3 := alive{Node: m3.config.Name, Addr: ip, Port: uint16(m3.config.BindPort), Incarnation: 1, Vsn: m3.config.BuildVsnArray()}
 	m1.aliveNode(&a3, nil, false)
 
 	vsn4 := []uint8{
 		0, 0, 0,
 		0, 0, 0,
 	}
-	// Node 4 never gets started.
-	a4 := alive{Node: addr4.String(), Addr: ip4, Port: uint16(bindPort), Incarnation: 1, Vsn: vsn4}
+	// Node 4 never gets started (fake node with wrong version).
+	fakeNodeName := "fake-node-wrong-vsn"
+	a4 := alive{Node: fakeNodeName, Addr: ip, Port: uint16(12345), Incarnation: 1, Vsn: vsn4}
 	m1.aliveNode(&a4, nil, false)
 
 	// Start the health in a degraded state.
@@ -743,20 +704,15 @@ func TestMemberList_ProbeNode_Wrong_VSN(t *testing.T) {
 		t.Fatalf("bad: %d", score)
 	}
 
-	// Have node m1 probe m4.
-	n, ok := m1.nodeMap[addr4.String()]
+	// Have node m1 probe fake node.
+	n, ok := m1.nodeMap[fakeNodeName]
 	if ok || n != nil {
-		t.Fatalf("expect node a4 to be not taken into account, because of its wrong version")
+		t.Fatalf("expect fake node to be not taken into account, because of its wrong version")
 	}
 }
 
 func TestMemberList_ProbeNode_Awareness_Improved(t *testing.T) {
-	addr1 := getBindAddr()
-	addr2 := getBindAddr()
-	ip1 := []byte(addr1)
-	ip2 := []byte(addr2)
-
-	m1 := HostMemberlist(addr1.String(), t, func(c *Config) {
+	m1 := HostMemberlist("", t, func(c *Config) {
 		c.ProbeTimeout = 10 * time.Millisecond
 		c.ProbeInterval = 200 * time.Millisecond
 	})
@@ -766,20 +722,17 @@ func TestMemberList_ProbeNode_Awareness_Improved(t *testing.T) {
 		}
 	}()
 
-	bindPort := m1.config.BindPort
-
-	m2 := HostMemberlist(addr2.String(), t, func(c *Config) {
-		c.BindPort = bindPort
-	})
+	m2 := HostMemberlist("", t, nil)
 	defer func() {
 		if err := m2.Shutdown(); err != nil {
 			t.Fatal(err)
 		}
 	}()
 
-	a1 := alive{Node: addr1.String(), Addr: ip1, Port: uint16(bindPort), Incarnation: 1, Vsn: m1.config.BuildVsnArray()}
+	ip := net.ParseIP(m1.config.BindAddr).To4()
+	a1 := alive{Node: m1.config.Name, Addr: ip, Port: uint16(m1.config.BindPort), Incarnation: 1, Vsn: m1.config.BuildVsnArray()}
 	m1.aliveNode(&a1, nil, true)
-	a2 := alive{Node: addr2.String(), Addr: ip2, Port: uint16(bindPort), Incarnation: 1, Vsn: m2.config.BuildVsnArray()}
+	a2 := alive{Node: m2.config.Name, Addr: ip, Port: uint16(m2.config.BindPort), Incarnation: 1, Vsn: m2.config.BuildVsnArray()}
 	m1.aliveNode(&a2, nil, false)
 
 	// Start the health in a degraded state.
@@ -789,7 +742,7 @@ func TestMemberList_ProbeNode_Awareness_Improved(t *testing.T) {
 	}
 
 	// Have node m1 probe m2.
-	n := m1.nodeMap[addr2.String()]
+	n := m1.nodeMap[m2.config.Name]
 	m1.probeNode(n)
 
 	// Node should be reported alive.
@@ -804,17 +757,8 @@ func TestMemberList_ProbeNode_Awareness_Improved(t *testing.T) {
 }
 
 func TestMemberList_ProbeNode_Awareness_MissedNack(t *testing.T) {
-	addr1 := getBindAddr()
-	addr2 := getBindAddr()
-	addr3 := getBindAddr()
-	addr4 := getBindAddr()
-	ip1 := []byte(addr1)
-	ip2 := []byte(addr2)
-	ip3 := []byte(addr3)
-	ip4 := []byte(addr4)
-
 	var probeTimeMax time.Duration
-	m1 := HostMemberlist(addr1.String(), t, func(c *Config) {
+	m1 := HostMemberlist("", t, func(c *Config) {
 		c.ProbeTimeout = 10 * time.Millisecond
 		c.ProbeInterval = 200 * time.Millisecond
 		probeTimeMax = c.ProbeInterval + 50*time.Millisecond
@@ -825,10 +769,7 @@ func TestMemberList_ProbeNode_Awareness_MissedNack(t *testing.T) {
 		}
 	}()
 
-	bindPort := m1.config.BindPort
-
-	m2 := HostMemberlist(addr2.String(), t, func(c *Config) {
-		c.BindPort = bindPort
+	m2 := HostMemberlist("", t, func(c *Config) {
 		c.ProbeTimeout = 10 * time.Millisecond
 		c.ProbeInterval = 200 * time.Millisecond
 	})
@@ -838,16 +779,17 @@ func TestMemberList_ProbeNode_Awareness_MissedNack(t *testing.T) {
 		}
 	}()
 
-	a1 := alive{Node: addr1.String(), Addr: ip1, Port: uint16(bindPort), Incarnation: 1, Vsn: m1.config.BuildVsnArray()}
+	ip := net.ParseIP(m1.config.BindAddr).To4()
+	a1 := alive{Node: m1.config.Name, Addr: ip, Port: uint16(m1.config.BindPort), Incarnation: 1, Vsn: m1.config.BuildVsnArray()}
 	m1.aliveNode(&a1, nil, true)
-	a2 := alive{Node: addr2.String(), Addr: ip2, Port: uint16(bindPort), Incarnation: 1, Vsn: m1.config.BuildVsnArray()}
+	a2 := alive{Node: m2.config.Name, Addr: ip, Port: uint16(m2.config.BindPort), Incarnation: 1, Vsn: m1.config.BuildVsnArray()}
 	m1.aliveNode(&a2, nil, false)
 
 	vsn := m1.config.BuildVsnArray()
-	// Node 3 and node 4 never get started.
-	a3 := alive{Node: addr3.String(), Addr: ip3, Port: uint16(bindPort), Incarnation: 1, Vsn: vsn}
+	// Node 3 and node 4 never get started (fake nodes).
+	a3 := alive{Node: "fake-node-3", Addr: ip, Port: uint16(12345), Incarnation: 1, Vsn: vsn}
 	m1.aliveNode(&a3, nil, false)
-	a4 := alive{Node: addr4.String(), Addr: ip4, Port: uint16(bindPort), Incarnation: 1, Vsn: vsn}
+	a4 := alive{Node: "fake-node-4", Addr: ip, Port: uint16(12346), Incarnation: 1, Vsn: vsn}
 	m1.aliveNode(&a4, nil, false)
 
 	// Make sure health looks good.
@@ -855,8 +797,8 @@ func TestMemberList_ProbeNode_Awareness_MissedNack(t *testing.T) {
 		t.Fatalf("bad: %d", score)
 	}
 
-	// Have node m1 probe m4.
-	n := m1.nodeMap[addr4.String()]
+	// Have node m1 probe fake-node-4.
+	n := m1.nodeMap["fake-node-4"]
 	startProbe := time.Now()
 	m1.probeNode(n)
 	probeTime := time.Since(startProbe)
@@ -887,17 +829,8 @@ func TestMemberList_ProbeNode_Awareness_MissedNack(t *testing.T) {
 }
 
 func TestMemberList_ProbeNode_Awareness_OldProtocol(t *testing.T) {
-	addr1 := getBindAddr()
-	addr2 := getBindAddr()
-	addr3 := getBindAddr()
-	addr4 := getBindAddr()
-	ip1 := []byte(addr1)
-	ip2 := []byte(addr2)
-	ip3 := []byte(addr3)
-	ip4 := []byte(addr4)
-
 	var probeTimeMax time.Duration
-	m1 := HostMemberlist(addr1.String(), t, func(c *Config) {
+	m1 := HostMemberlist("", t, func(c *Config) {
 		c.ProbeTimeout = 10 * time.Millisecond
 		c.ProbeInterval = 200 * time.Millisecond
 		probeTimeMax = c.ProbeInterval + 20*time.Millisecond
@@ -908,35 +841,31 @@ func TestMemberList_ProbeNode_Awareness_OldProtocol(t *testing.T) {
 		}
 	}()
 
-	bindPort := m1.config.BindPort
-
-	m2 := HostMemberlist(addr2.String(), t, func(c *Config) {
-		c.BindPort = bindPort
-	})
+	m2 := HostMemberlist("", t, nil)
 	defer func() {
 		if err := m2.Shutdown(); err != nil {
 			t.Fatal(err)
 		}
 	}()
 
-	m3 := HostMemberlist(addr3.String(), t, func(c *Config) {
-		c.BindPort = bindPort
-	})
+	m3 := HostMemberlist("", t, nil)
 	defer func() {
 		if err := m3.Shutdown(); err != nil {
 			t.Fatal(err)
 		}
 	}()
 
-	a1 := alive{Node: addr1.String(), Addr: ip1, Port: uint16(bindPort), Incarnation: 1}
+	ip := net.ParseIP(m1.config.BindAddr).To4()
+	a1 := alive{Node: m1.config.Name, Addr: ip, Port: uint16(m1.config.BindPort), Incarnation: 1}
 	m1.aliveNode(&a1, nil, true)
-	a2 := alive{Node: addr2.String(), Addr: ip2, Port: uint16(bindPort), Incarnation: 1}
+	a2 := alive{Node: m2.config.Name, Addr: ip, Port: uint16(m2.config.BindPort), Incarnation: 1}
 	m1.aliveNode(&a2, nil, false)
-	a3 := alive{Node: addr3.String(), Addr: ip3, Port: uint16(bindPort), Incarnation: 1}
+	a3 := alive{Node: m3.config.Name, Addr: ip, Port: uint16(m3.config.BindPort), Incarnation: 1}
 	m1.aliveNode(&a3, nil, false)
 
-	// Node 4 never gets started.
-	a4 := alive{Node: addr4.String(), Addr: ip4, Port: uint16(bindPort), Incarnation: 1}
+	// Node 4 never gets started (fake node).
+	fakeNodeName := "fake-node-4"
+	a4 := alive{Node: fakeNodeName, Addr: ip, Port: uint16(12345), Incarnation: 1}
 	m1.aliveNode(&a4, nil, false)
 
 	// Make sure health looks good.
@@ -944,8 +873,8 @@ func TestMemberList_ProbeNode_Awareness_OldProtocol(t *testing.T) {
 		t.Fatalf("bad: %d", score)
 	}
 
-	// Have node m1 probe m4.
-	n := m1.nodeMap[addr4.String()]
+	// Have node m1 probe fake node.
+	n := m1.nodeMap[fakeNodeName]
 	startProbe := time.Now()
 	m1.probeNode(n)
 	probeTime := time.Since(startProbe)
@@ -974,12 +903,7 @@ func TestMemberList_ProbeNode_Awareness_OldProtocol(t *testing.T) {
 }
 
 func TestMemberList_ProbeNode_Buddy(t *testing.T) {
-	addr1 := getBindAddr()
-	addr2 := getBindAddr()
-	ip1 := []byte(addr1)
-	ip2 := []byte(addr2)
-
-	m1 := HostMemberlist(addr1.String(), t, func(c *Config) {
+	m1 := HostMemberlist("", t, func(c *Config) {
 		c.ProbeTimeout = time.Millisecond
 		c.ProbeInterval = 10 * time.Millisecond
 	})
@@ -989,27 +913,25 @@ func TestMemberList_ProbeNode_Buddy(t *testing.T) {
 		}
 	}()
 
-	bindPort := m1.config.BindPort
-
-	m2 := HostMemberlist(addr2.String(), t, func(c *Config) {
-		c.BindPort = bindPort
-	})
+	m2 := HostMemberlist("", t, nil)
 	defer func() {
 		if err := m2.Shutdown(); err != nil {
 			t.Fatal(err)
 		}
 	}()
 
-	a1 := alive{Node: addr1.String(), Addr: ip1, Port: uint16(bindPort), Incarnation: 1, Vsn: m1.config.BuildVsnArray()}
-	a2 := alive{Node: addr2.String(), Addr: ip2, Port: uint16(bindPort), Incarnation: 1, Vsn: m2.config.BuildVsnArray()}
+	ip := net.ParseIP(m1.config.BindAddr).To4()
+	a1 := alive{Node: m1.config.Name, Addr: ip, Port: uint16(m1.config.BindPort), Incarnation: 1, Vsn: m1.config.BuildVsnArray()}
+	a2 := alive{Node: m2.config.Name, Addr: ip, Port: uint16(m2.config.BindPort), Incarnation: 1, Vsn: m2.config.BuildVsnArray()}
 
 	m1.aliveNode(&a1, nil, true)
 	m1.aliveNode(&a2, nil, false)
+	m2.aliveNode(&a1, nil, false) // m2 also needs to know about m1
 	m2.aliveNode(&a2, nil, true)
 
 	// Force the state to suspect so we piggyback a suspect message with the ping.
 	// We should see this get refuted later, and the ping will succeed.
-	n := m1.nodeMap[addr2.String()]
+	n := m1.nodeMap[m2.config.Name]
 	n.State = StateSuspect
 	m1.probeNode(n)
 
@@ -1018,24 +940,27 @@ func TestMemberList_ProbeNode_Buddy(t *testing.T) {
 		t.Fatalf("bad seqno %v", m1.sequenceNum)
 	}
 
-	// Check a broadcast is queued.
-	if num := m2.broadcasts.NumQueued(); num != 1 {
-		t.Fatalf("expected only one queued message: %d", num)
+	// Check that at least one broadcast is queued (the alive message refuting the suspect).
+	if num := m2.broadcasts.NumQueued(); num < 1 {
+		t.Fatalf("expected at least one queued message: %d", num)
 	}
 
-	// Should be alive msg.
-	if messageType(m2.broadcasts.orderedView(true)[0].b.Message()[0]) != aliveMsg {
-		t.Fatalf("expected queued alive msg")
+	// Should have at least one alive msg (the refutation).
+	broadcasts := m2.broadcasts.orderedView(true)
+	foundAlive := false
+	for _, b := range broadcasts {
+		if messageType(b.b.Message()[0]) == aliveMsg {
+			foundAlive = true
+			break
+		}
+	}
+	if !foundAlive {
+		t.Fatalf("expected at least one queued alive msg")
 	}
 }
 
 func TestMemberList_ProbeNode(t *testing.T) {
-	addr1 := getBindAddr()
-	addr2 := getBindAddr()
-	ip1 := []byte(addr1)
-	ip2 := []byte(addr2)
-
-	m1 := HostMemberlist(addr1.String(), t, func(c *Config) {
+	m1 := HostMemberlist("", t, func(c *Config) {
 		c.ProbeTimeout = time.Millisecond
 		c.ProbeInterval = 10 * time.Millisecond
 	})
@@ -1045,23 +970,20 @@ func TestMemberList_ProbeNode(t *testing.T) {
 		}
 	}()
 
-	bindPort := m1.config.BindPort
-
-	m2 := HostMemberlist(addr2.String(), t, func(c *Config) {
-		c.BindPort = bindPort
-	})
+	m2 := HostMemberlist("", t, nil)
 	defer func() {
 		if err := m2.Shutdown(); err != nil {
 			t.Fatal(err)
 		}
 	}()
 
-	a1 := alive{Node: addr1.String(), Addr: ip1, Port: uint16(bindPort), Incarnation: 1}
+	ip := net.ParseIP(m1.config.BindAddr).To4()
+	a1 := alive{Node: m1.config.Name, Addr: ip, Port: uint16(m1.config.BindPort), Incarnation: 1}
 	m1.aliveNode(&a1, nil, true)
-	a2 := alive{Node: addr2.String(), Addr: ip2, Port: uint16(bindPort), Incarnation: 1}
+	a2 := alive{Node: m2.config.Name, Addr: ip, Port: uint16(m2.config.BindPort), Incarnation: 1}
 	m1.aliveNode(&a2, nil, false)
 
-	n := m1.nodeMap[addr2.String()]
+	n := m1.nodeMap[m2.config.Name]
 	m1.probeNode(n)
 
 	// Should be marked alive
@@ -1076,12 +998,7 @@ func TestMemberList_ProbeNode(t *testing.T) {
 }
 
 func TestMemberList_Ping(t *testing.T) {
-	addr1 := getBindAddr()
-	addr2 := getBindAddr()
-	ip1 := []byte(addr1)
-	ip2 := []byte(addr2)
-
-	m1 := HostMemberlist(addr1.String(), t, func(c *Config) {
+	m1 := HostMemberlist("", t, func(c *Config) {
 		c.ProbeTimeout = 1 * time.Second
 		c.ProbeInterval = 10 * time.Second
 	})
@@ -1091,25 +1008,22 @@ func TestMemberList_Ping(t *testing.T) {
 		}
 	}()
 
-	bindPort := m1.config.BindPort
-
-	m2 := HostMemberlist(addr2.String(), t, func(c *Config) {
-		c.BindPort = bindPort
-	})
+	m2 := HostMemberlist("", t, nil)
 	defer func() {
 		if err := m2.Shutdown(); err != nil {
 			t.Fatal(err)
 		}
 	}()
 
-	a1 := alive{Node: addr1.String(), Addr: ip1, Port: uint16(bindPort), Incarnation: 1}
+	ip := net.ParseIP(m1.config.BindAddr).To4()
+	a1 := alive{Node: m1.config.Name, Addr: ip, Port: uint16(m1.config.BindPort), Incarnation: 1}
 	m1.aliveNode(&a1, nil, true)
-	a2 := alive{Node: addr2.String(), Addr: ip2, Port: uint16(bindPort), Incarnation: 1}
+	a2 := alive{Node: m2.config.Name, Addr: ip, Port: uint16(m2.config.BindPort), Incarnation: 1}
 	m1.aliveNode(&a2, nil, false)
 
 	// Do a legit ping.
-	n := m1.nodeMap[addr2.String()]
-	addr, err := net.ResolveUDPAddr("udp", net.JoinHostPort(addr2.String(), strconv.Itoa(bindPort)))
+	n := m1.nodeMap[m2.config.Name]
+	addr, err := net.ResolveUDPAddr("udp", net.JoinHostPort(m2.config.BindAddr, strconv.Itoa(m2.config.BindPort)))
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -2263,14 +2177,7 @@ func TestMemberList_MergeState(t *testing.T) {
 func TestMemberlist_Gossip(t *testing.T) {
 	ch := make(chan NodeEvent, 3)
 
-	addr1 := getBindAddr()
-	addr2 := getBindAddr()
-	addr3 := getBindAddr()
-	ip1 := []byte(addr1)
-	ip2 := []byte(addr2)
-	ip3 := []byte(addr3)
-
-	m1 := HostMemberlist(addr1.String(), t, func(c *Config) {
+	m1 := HostMemberlist("", t, func(c *Config) {
 		// Set the gossip interval fast enough to get a reasonable test,
 		// but slow enough to avoid "sendto: operation not permitted"
 		c.GossipInterval = 10 * time.Millisecond
@@ -2281,10 +2188,7 @@ func TestMemberlist_Gossip(t *testing.T) {
 		}
 	}()
 
-	bindPort := m1.config.BindPort
-
-	m2 := HostMemberlist(addr2.String(), t, func(c *Config) {
-		c.BindPort = bindPort
+	m2 := HostMemberlist("", t, func(c *Config) {
 		c.Events = &ChannelEventDelegate{ch}
 		// Set the gossip interval fast enough to get a reasonable test,
 		// but slow enough to avoid "sendto: operation not permitted"
@@ -2296,19 +2200,19 @@ func TestMemberlist_Gossip(t *testing.T) {
 		}
 	}()
 
-	m3 := HostMemberlist(addr2.String(), t, func(c *Config) {
-	})
+	m3 := HostMemberlist("", t, nil)
 	defer func() {
 		if err := m3.Shutdown(); err != nil {
 			t.Fatal(err)
 		}
 	}()
 
-	a1 := alive{Node: addr1.String(), Addr: ip1, Port: uint16(bindPort), Incarnation: 1, Vsn: m1.config.BuildVsnArray()}
+	ip := net.ParseIP(m1.config.BindAddr).To4()
+	a1 := alive{Node: m1.config.Name, Addr: ip, Port: uint16(m1.config.BindPort), Incarnation: 1, Vsn: m1.config.BuildVsnArray()}
 	m1.aliveNode(&a1, nil, true)
-	a2 := alive{Node: addr2.String(), Addr: ip2, Port: uint16(bindPort), Incarnation: 1, Vsn: m2.config.BuildVsnArray()}
+	a2 := alive{Node: m2.config.Name, Addr: ip, Port: uint16(m2.config.BindPort), Incarnation: 1, Vsn: m2.config.BuildVsnArray()}
 	m1.aliveNode(&a2, nil, false)
-	a3 := alive{Node: addr3.String(), Addr: ip3, Port: uint16(bindPort), Incarnation: 1, Vsn: m3.config.BuildVsnArray()}
+	a3 := alive{Node: m3.config.Name, Addr: ip, Port: uint16(m3.config.BindPort), Incarnation: 1, Vsn: m3.config.BuildVsnArray()}
 	m1.aliveNode(&a3, nil, false)
 
 	// Gossip should send all this to m2. Retry a few times because it's UDP and
@@ -2351,12 +2255,7 @@ func retry(t *testing.T, n int, w time.Duration, fn func(func(string, ...interfa
 func TestMemberlist_GossipToDead(t *testing.T) {
 	ch := make(chan NodeEvent, 2)
 
-	addr1 := getBindAddr()
-	addr2 := getBindAddr()
-	ip1 := []byte(addr1)
-	ip2 := []byte(addr2)
-
-	m1 := HostMemberlist(addr1.String(), t, func(c *Config) {
+	m1 := HostMemberlist("", t, func(c *Config) {
 		c.GossipInterval = time.Millisecond
 		c.GossipToTheDeadTime = 100 * time.Millisecond
 	})
@@ -2366,10 +2265,7 @@ func TestMemberlist_GossipToDead(t *testing.T) {
 		}
 	}()
 
-	bindPort := m1.config.BindPort
-
-	m2 := HostMemberlist(addr2.String(), t, func(c *Config) {
-		c.BindPort = bindPort
+	m2 := HostMemberlist("", t, func(c *Config) {
 		c.Events = &ChannelEventDelegate{ch}
 	})
 
@@ -2379,14 +2275,15 @@ func TestMemberlist_GossipToDead(t *testing.T) {
 		}
 	}()
 
-	a1 := alive{Node: addr1.String(), Addr: ip1, Port: uint16(bindPort), Incarnation: 1, Vsn: m1.config.BuildVsnArray()}
+	ip := net.ParseIP(m1.config.BindAddr).To4()
+	a1 := alive{Node: m1.config.Name, Addr: ip, Port: uint16(m1.config.BindPort), Incarnation: 1, Vsn: m1.config.BuildVsnArray()}
 	m1.aliveNode(&a1, nil, true)
-	a2 := alive{Node: addr2.String(), Addr: ip2, Port: uint16(bindPort), Incarnation: 1, Vsn: m2.config.BuildVsnArray()}
+	a2 := alive{Node: m2.config.Name, Addr: ip, Port: uint16(m2.config.BindPort), Incarnation: 1, Vsn: m2.config.BuildVsnArray()}
 	m1.aliveNode(&a2, nil, false)
 
 	// Shouldn't send anything to m2 here, node has been dead for 2x the GossipToTheDeadTime
-	m1.nodeMap[addr2.String()].State = StateDead
-	m1.nodeMap[addr2.String()].StateChange = time.Now().Add(-200 * time.Millisecond)
+	m1.nodeMap[m2.config.Name].State = StateDead
+	m1.nodeMap[m2.config.Name].StateChange = time.Now().Add(-200 * time.Millisecond)
 	m1.gossip()
 
 	select {
@@ -2396,7 +2293,7 @@ func TestMemberlist_GossipToDead(t *testing.T) {
 	}
 
 	// Should gossip to m2 because its state has changed within GossipToTheDeadTime
-	m1.nodeMap[addr2.String()].StateChange = time.Now().Add(-20 * time.Millisecond)
+	m1.nodeMap[m2.config.Name].StateChange = time.Now().Add(-20 * time.Millisecond)
 
 	retry(t, 5, 10*time.Millisecond, func(failf func(string, ...interface{})) {
 		m1.gossip()
