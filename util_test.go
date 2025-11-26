@@ -429,6 +429,44 @@ func TestKRandomNodesWithDelegate(t *testing.T) {
 			seen[node.Name] = true
 		}
 	})
+
+	t.Run("all nodes excluded", func(t *testing.T) {
+		// Create a delegate that would select all nodes, but exclude function filters all out.
+		delegate := &testNodeSelectionDelegate{
+			selectFunc: func(nodes []*Node) (selected []*Node, preferred *Node) {
+				// Should receive empty slice since all nodes are excluded.
+				return nodes, nil
+			},
+		}
+
+		excludeFunc := func(n *nodeState) bool {
+			return true // Exclude all nodes
+		}
+
+		result := kRandomNodes(3, nodes, delegate, excludeFunc)
+
+		// Should get no nodes
+		assert.Empty(t, result)
+	})
+}
+
+func BenchmarkKRandomNodes(b *testing.B) {
+	nodes := make([]*nodeState, 10000)
+	for i := 0; i < len(nodes); i++ {
+		nodes[i] = &nodeState{
+			Node:  Node{Name: fmt.Sprintf("node-%d", i)},
+			State: StateAlive,
+		}
+	}
+
+	excludeFunc := func(n *nodeState) bool {
+		return n.State != StateAlive
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		kRandomNodes(3, nodes, nil, excludeFunc)
+	}
 }
 
 func TestMakeCompoundMessage(t *testing.T) {
