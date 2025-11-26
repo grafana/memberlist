@@ -107,33 +107,33 @@ func TestRetransmitLimit(t *testing.T) {
 }
 
 func TestShuffleNodes(t *testing.T) {
-	orig := []*nodeState{
-		&nodeState{
+	orig := []*NodeState{
+		&NodeState{
 			State: StateDead,
 		},
-		&nodeState{
+		&NodeState{
 			State: StateAlive,
 		},
-		&nodeState{
+		&NodeState{
 			State: StateAlive,
 		},
-		&nodeState{
+		&NodeState{
 			State: StateDead,
 		},
-		&nodeState{
+		&NodeState{
 			State: StateAlive,
 		},
-		&nodeState{
+		&NodeState{
 			State: StateAlive,
 		},
-		&nodeState{
+		&NodeState{
 			State: StateDead,
 		},
-		&nodeState{
+		&NodeState{
 			State: StateAlive,
 		},
 	}
-	nodes := make([]*nodeState, len(orig))
+	nodes := make([]*NodeState, len(orig))
 	copy(nodes[:], orig[:])
 
 	if !reflect.DeepEqual(nodes, orig) {
@@ -167,44 +167,44 @@ func TestPushPullScale(t *testing.T) {
 }
 
 func TestMoveDeadNodes(t *testing.T) {
-	nodes := []*nodeState{
-		&nodeState{
+	nodes := []*NodeState{
+		&NodeState{
 			State:       StateDead,
 			StateChange: time.Now().Add(-20 * time.Second),
 		},
-		&nodeState{
+		&NodeState{
 			State:       StateAlive,
 			StateChange: time.Now().Add(-20 * time.Second),
 		},
 		// This dead node should not be moved, as its state changed
 		// less than the specified GossipToTheDead time ago
-		&nodeState{
+		&NodeState{
 			State:       StateDead,
 			StateChange: time.Now().Add(-10 * time.Second),
 		},
 		// This left node should not be moved, as its state changed
 		// less than the specified GossipToTheDead time ago
-		&nodeState{
+		&NodeState{
 			State:       StateLeft,
 			StateChange: time.Now().Add(-10 * time.Second),
 		},
-		&nodeState{
+		&NodeState{
 			State:       StateLeft,
 			StateChange: time.Now().Add(-20 * time.Second),
 		},
-		&nodeState{
+		&NodeState{
 			State:       StateAlive,
 			StateChange: time.Now().Add(-20 * time.Second),
 		},
-		&nodeState{
+		&NodeState{
 			State:       StateDead,
 			StateChange: time.Now().Add(-20 * time.Second),
 		},
-		&nodeState{
+		&NodeState{
 			State:       StateAlive,
 			StateChange: time.Now().Add(-20 * time.Second),
 		},
-		&nodeState{
+		&NodeState{
 			State:       StateLeft,
 			StateChange: time.Now().Add(-20 * time.Second),
 		},
@@ -241,7 +241,7 @@ func TestMoveDeadNodes(t *testing.T) {
 }
 
 func TestKRandomNodes(t *testing.T) {
-	nodes := []*nodeState{}
+	nodes := []*NodeState{}
 	for i := 0; i < 90; i++ {
 		// Half the nodes are in a bad state
 		state := StateAlive
@@ -253,7 +253,7 @@ func TestKRandomNodes(t *testing.T) {
 		case 2:
 			state = StateDead
 		}
-		nodes = append(nodes, &nodeState{
+		nodes = append(nodes, &NodeState{
 			Node: Node{
 				Name: fmt.Sprintf("test%d", i),
 			},
@@ -261,7 +261,7 @@ func TestKRandomNodes(t *testing.T) {
 		})
 	}
 
-	filterFunc := func(n *nodeState) bool {
+	filterFunc := func(n *NodeState) bool {
 		if n.Name == "test0" || n.State != StateAlive {
 			return true
 		}
@@ -298,7 +298,7 @@ func TestKRandomNodes(t *testing.T) {
 }
 
 func TestKRandomNodesWithDelegate(t *testing.T) {
-	var nodes []*nodeState
+	var nodes []*NodeState
 	for i := 0; i < 20; i++ {
 		state := StateAlive
 		switch i % 3 {
@@ -309,7 +309,7 @@ func TestKRandomNodesWithDelegate(t *testing.T) {
 		case 2:
 			state = StateDead
 		}
-		nodes = append(nodes, &nodeState{
+		nodes = append(nodes, &NodeState{
 			Node:  Node{Name: fmt.Sprintf("%d", i)},
 			State: state,
 		})
@@ -317,19 +317,23 @@ func TestKRandomNodesWithDelegate(t *testing.T) {
 
 	t.Run("with preferred nodes", func(t *testing.T) {
 		// Create a delegate that selects nodes 3, 6, 9, 12
-		// and prefers nodes 6 and 12
+		// and prefers node 6
 		delegate := &testNodeSelectionDelegate{
-			selectFunc: func(n Node) (selected, preferred bool) {
-				switch n.Name {
-				case "3", "6", "9", "12":
-					selected = true
-					preferred = n.Name == "6" || n.Name == "12"
+			selectFunc: func(nodes []*NodeState) (selected []*NodeState, preferred *NodeState) {
+				for _, n := range nodes {
+					switch n.Name {
+					case "3", "6", "9", "12":
+						selected = append(selected, n)
+						if n.Name == "6" {
+							preferred = n
+						}
+					}
 				}
 				return
 			},
 		}
 
-		excludeFunc := func(n *nodeState) bool {
+		excludeFunc := func(n *NodeState) bool {
 			return n.State != StateAlive
 		}
 
@@ -340,10 +344,10 @@ func TestKRandomNodesWithDelegate(t *testing.T) {
 		require.LessOrEqual(t, len(result), 3)
 		require.Greater(t, len(result), 0)
 
-		// At least one should be a preferred node
+		// The preferred node "6" should be in the result
 		hasPreferred := false
 		for _, node := range result {
-			if node.Name == "6" || node.Name == "12" {
+			if node.Name == "6" {
 				hasPreferred = true
 				break
 			}
@@ -360,17 +364,18 @@ func TestKRandomNodesWithDelegate(t *testing.T) {
 	t.Run("with no preferred nodes", func(t *testing.T) {
 		// Create a delegate that selects nodes 3, 6, 9 but marks none as preferred
 		delegate := &testNodeSelectionDelegate{
-			selectFunc: func(n Node) (selected, preferred bool) {
-				switch n.Name {
-				case "3", "6", "9":
-					selected = true
-					preferred = false
+			selectFunc: func(nodes []*NodeState) (selected []*NodeState, preferred *NodeState) {
+				for _, n := range nodes {
+					switch n.Name {
+					case "3", "6", "9":
+						selected = append(selected, n)
+					}
 				}
-				return
+				return // preferred is nil
 			},
 		}
 
-		filterFunc := func(n *nodeState) bool {
+		filterFunc := func(n *NodeState) bool {
 			return n.State != StateAlive
 		}
 
@@ -388,16 +393,20 @@ func TestKRandomNodesWithDelegate(t *testing.T) {
 		}
 	})
 
-	t.Run("all nodes selected and preferred with k equal to node count", func(t *testing.T) {
-		// Create a delegate that marks all alive nodes as both selected and preferred
+	t.Run("all nodes selected with one preferred", func(t *testing.T) {
+		// Create a delegate that selects all nodes and picks the first alive one as preferred
 		delegate := &testNodeSelectionDelegate{
-			selectFunc: func(n Node) (selected, preferred bool) {
-				// All nodes are both selected and preferred
-				return true, true
+			selectFunc: func(nodes []*NodeState) (_ []*NodeState, preferred *NodeState) {
+				for _, n := range nodes {
+					if preferred == nil && n.State == StateAlive {
+						preferred = n
+					}
+				}
+				return nodes, preferred
 			},
 		}
 
-		excludeFunc := func(n *nodeState) bool {
+		excludeFunc := func(n *NodeState) bool {
 			return n.State != StateAlive
 		}
 
@@ -510,11 +519,11 @@ func TestCompressDecompressPayload(t *testing.T) {
 }
 
 type testNodeSelectionDelegate struct {
-	selectFunc func(Node) (selected, preferred bool)
+	selectFunc func([]*NodeState) (selected []*NodeState, preferred *NodeState)
 }
 
-func (d *testNodeSelectionDelegate) SelectNode(n Node) (selected, preferred bool) {
-	return d.selectFunc(n)
+func (d *testNodeSelectionDelegate) SelectNodes(nodes []*NodeState) (selected []*NodeState, preferred *NodeState) {
+	return d.selectFunc(nodes)
 }
 
 func TestMakeCompoundMessages(t *testing.T) {
@@ -650,4 +659,42 @@ func TestMakeCompoundMessages(t *testing.T) {
 			}
 		})
 	}
+}
+
+func BenchmarkKRandomNodes(b *testing.B) {
+	// Create 10K alive nodes
+	nodes := make([]*NodeState, 10000)
+	for i := 0; i < 10000; i++ {
+		nodes[i] = &NodeState{
+			Node:  Node{Name: fmt.Sprintf("node%d", i)},
+			State: StateAlive,
+		}
+	}
+
+	excludeFunc := func(n *NodeState) bool {
+		return n.State != StateAlive
+	}
+
+	b.Run("without delegate", func(b *testing.B) {
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			kRandomNodes(3, nodes, nil, excludeFunc)
+		}
+	})
+
+	b.Run("with delegate", func(b *testing.B) {
+		delegate := &testNodeSelectionDelegate{
+			selectFunc: func(nodes []*NodeState) (selected []*NodeState, preferred *NodeState) {
+				if len(nodes) > 0 {
+					preferred = nodes[0]
+				}
+				return nodes, preferred
+			},
+		}
+
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			kRandomNodes(3, nodes, delegate, excludeFunc)
+		}
+	})
 }

@@ -1727,7 +1727,7 @@ func TestMemberList_SuspectNode(t *testing.T) {
 	a := alive{Node: "test", Addr: []byte{127, 0, 0, 1}, Incarnation: 1, Vsn: m.config.BuildVsnArray()}
 	m.aliveNode(&a, nil, false)
 
-	m.changeNode("test", func(state *nodeState) {
+	m.changeNode("test", func(state *NodeState) {
 		state.StateChange = state.StateChange.Add(-time.Hour)
 	})
 
@@ -2664,9 +2664,9 @@ func testVerifyProtocolSingle(t *testing.T, A [][6]uint8, B [][6]uint8, expect b
 		}
 	}()
 
-	m.nodes = make([]*nodeState, len(A))
+	m.nodes = make([]*NodeState, len(A))
 	for i, n := range A {
-		m.nodes[i] = &nodeState{
+		m.nodes[i] = &NodeState{
 			Node: Node{
 				PMin: n[0],
 				PMax: n[1],
