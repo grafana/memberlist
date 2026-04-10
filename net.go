@@ -460,17 +460,22 @@ func (m *Memberlist) handleCommand(buf []byte, from net.Addr, timestamp time.Tim
 
 		// Check for overflow and append if not full
 		m.msgQueueLock.Lock()
-		if queue.Len() >= m.config.HandoffQueueDepth {
-			m.logger.Printf("[WARN] memberlist: handler queue full, dropping message (%d) %s", msgType, LogAddress(from))
-		} else {
+		dropped := queue.Len() >= m.config.HandoffQueueDepth
+		if !dropped {
 			queue.PushBack(msgHandoff{msgType, buf, from})
 		}
 		m.msgQueueLock.Unlock()
 
-		// Notify of pending message
-		select {
-		case m.handoffCh <- struct{}{}:
-		default:
+		if dropped {
+			// Log outside the lock to avoid blocking other goroutines (e.g. getNextMessage)
+			// on potentially slow I/O while holding msgQueueLock.
+			m.logger.Printf("[WARN] memberlist: handler queue full, dropping message (%d) %s", msgType, LogAddress(from))
+		} else {
+			// Notify of pending message
+			select {
+			case m.handoffCh <- struct{}{}:
+			default:
+			}
 		}
 
 	default:
