@@ -5,10 +5,8 @@ package memberlist
 
 import (
 	"bytes"
-	"compress/lzw"
 	"encoding/binary"
 	"fmt"
-	"io"
 	"math"
 	"math/rand"
 	"net"
@@ -27,11 +25,6 @@ import (
 // while the 65th will triple it.
 const pushPullScaleThreshold = 32
 
-const (
-	// Constant litWidth 2-8
-	lzwLitWidth = 8
-)
-
 func init() {
 	_, _ = seed.Init()
 }
@@ -44,7 +37,14 @@ func decode(buf []byte, out interface{}) error {
 	return dec.Decode(out)
 }
 
-// Encode writes an encoded object to a new bytes buffer
+// encode writes an encoded object to a new bytes buffer.
+//
+// The returned buffer is NOT pooled because the encoded bytes can outlive
+// the immediate call: dskit's TCPTransport.WriteTo (and similar async
+// transports) hand the slice off to a writer goroutine via a channel, so
+// the bytes must be GC-managed. The compression scratch buffer used inside
+// compressPayload is pooled separately and is only held for the duration
+// of the compress call.
 func encode(msgType messageType, in interface{}, msgpackUseNewTimeFormat bool) (*bytes.Buffer, error) {
 	buf := bytes.NewBuffer(nil)
 	buf.WriteByte(uint8(msgType))
@@ -178,7 +178,8 @@ OUTER:
 // them into one or multiple messages based on the limitations
 // of compound messages (255 messages each, 64KB max message size).
 //
-// The input msgs can be modified in-place.
+// The input msgs can be modified in-place. Every returned buffer is owned
+// by the caller and must be released via releaseBuffer after use.
 func makeCompoundMessages(msgs [][]byte) []*bytes.Buffer {
 	const (
 		maxMsgs      = math.MaxUint8
@@ -217,10 +218,11 @@ func makeCompoundMessages(msgs [][]byte) []*bytes.Buffer {
 	return bufs
 }
 
-// makeCompoundMessage takes a list of messages and generates
-// a single compound message containing all of them
+// makeCompoundMessage takes a list of messages and generates a single
+// compound message containing all of them. The returned buffer is owned by
+// the caller; its bytes can be passed to an async transport so it is not
+// pooled (see the comment on encode for context).
 func makeCompoundMessage(msgs [][]byte) *bytes.Buffer {
-	// Create a local buffer
 	buf := bytes.NewBuffer(nil)
 
 	// Write out the type
@@ -279,66 +281,6 @@ func decodeCompoundMessage(buf []byte) (trunc int, parts [][]byte, err error) {
 		parts = append(parts, slice)
 	}
 	return
-}
-
-// compressPayload takes an opaque input buffer, compresses it
-// and wraps it in a compress{} message that is encoded.
-func compressPayload(inp []byte, msgpackUseNewTimeFormat bool) (*bytes.Buffer, error) {
-	var buf bytes.Buffer
-	compressor := lzw.NewWriter(&buf, lzw.LSB, lzwLitWidth)
-
-	_, err := compressor.Write(inp)
-	if err != nil {
-		return nil, err
-	}
-
-	// Ensure we flush everything out
-	if err := compressor.Close(); err != nil {
-		return nil, err
-	}
-
-	// Create a compressed message
-	c := compress{
-		Algo: lzwAlgo,
-		Buf:  buf.Bytes(),
-	}
-	return encode(compressMsg, &c, msgpackUseNewTimeFormat)
-}
-
-// decompressPayload is used to unpack an encoded compress{}
-// message and return its payload uncompressed
-func decompressPayload(msg []byte) ([]byte, error) {
-	// Decode the message
-	var c compress
-	if err := decode(msg, &c); err != nil {
-		return nil, err
-	}
-	return decompressBuffer(&c)
-}
-
-// decompressBuffer is used to decompress the buffer of
-// a single compress message, handling multiple algorithms
-func decompressBuffer(c *compress) ([]byte, error) {
-	// Verify the algorithm
-	if c.Algo != lzwAlgo {
-		return nil, fmt.Errorf("cannot decompress unknown algorithm %d", c.Algo)
-	}
-
-	// Create a uncompressor
-	uncomp := lzw.NewReader(bytes.NewReader(c.Buf), lzw.LSB, lzwLitWidth)
-	defer func() {
-		_ = uncomp.Close()
-	}()
-
-	// Read all the data
-	var b bytes.Buffer
-	_, err := io.Copy(&b, uncomp)
-	if err != nil {
-		return nil, err
-	}
-
-	// Return the uncompressed bytes
-	return b.Bytes(), nil
 }
 
 // joinHostPort returns the host:port form of an address, for use with a

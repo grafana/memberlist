@@ -1,8 +1,9 @@
 module github.com/hashicorp/memberlist
 
-go 1.20
+go 1.24
 
 require (
+	github.com/golang/snappy v1.0.0
 	github.com/google/btree v0.0.0-20180813153112-4030bb1f1f0c
 	github.com/hashicorp/go-metrics v0.5.4
 	github.com/hashicorp/go-msgpack/v2 v2.1.1

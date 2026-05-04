@@ -73,13 +73,6 @@ const (
 	hasLabelMsg messageType = 244
 )
 
-// compressionType is used to specify the compression algorithm
-type compressionType uint8
-
-const (
-	lzwAlgo compressionType = iota
-)
-
 const (
 	MetaMaxSize            = 512 // Maximum size for node meta data
 	compoundHeaderOverhead = 2   // Assumed header overhead
@@ -192,13 +185,6 @@ type pushNodeState struct {
 	Incarnation uint32
 	State       NodeStateType
 	Vsn         []uint8 // Protocol versions
-}
-
-// compress is used to wrap an underlying payload
-// using a specified compression algorithm
-type compress struct {
-	Algo compressionType
-	Buf  []byte
 }
 
 // msgHandoff is used to transfer a message between goroutines
@@ -767,12 +753,17 @@ func (m *Memberlist) handleUser(buf []byte, from net.Addr) {
 
 // handleCompressed is used to unpack a compressed message
 func (m *Memberlist) handleCompressed(buf []byte, from net.Addr, timestamp time.Time) {
-	// Try to decode the payload
-	payload, err := decompressPayload(buf)
+	algo, payload, err := decompressPayload(buf)
 	if err != nil {
+		metrics.IncrCounterWithLabels([]string{"memberlist", "compress", "error"}, 1,
+			append(m.metricLabels,
+				metrics.Label{Name: "algo", Value: algoLabel(algo)},
+				metrics.Label{Name: "op", Value: "decode"}))
 		m.logger.Printf("[ERR] memberlist: Failed to decompress payload: %v %s", err, LogAddress(from))
 		return
 	}
+	metrics.IncrCounterWithLabels([]string{"memberlist", "compress", "decoded"}, 1,
+		append(m.metricLabels, metrics.Label{Name: "algo", Value: algoLabel(algo)}))
 
 	// Recursively handle the payload
 	m.handleCommand(payload, from, timestamp)
@@ -832,14 +823,24 @@ func (m *Memberlist) rawSendMsgPacket(a Address, node *Node, msg []byte) error {
 
 	// Check if we have compression enabled
 	if m.config.EnableCompression {
-		buf, err := compressPayload(msg, m.config.MsgpackUseNewTimeFormat)
+		buf, err := compressPayload(m.compressionAlgo, msg, m.config.MsgpackUseNewTimeFormat)
 		if err != nil {
+			metrics.IncrCounterWithLabels([]string{"memberlist", "compress", "error"}, 1,
+				append(m.metricLabels,
+					metrics.Label{Name: "algo", Value: algoLabel(m.compressionAlgo)},
+					metrics.Label{Name: "op", Value: "encode"}))
 			m.logger.Printf("[WARN] memberlist: Failed to compress payload: %v", err)
+		} else if buf.Len() < len(msg) {
+			// Compression reduced the size; emit the compressed bytes.
+			msg = buf.Bytes()
+			metrics.IncrCounterWithLabels([]string{"memberlist", "compress", "encoded"}, 1,
+				append(m.metricLabels, metrics.Label{Name: "algo", Value: algoLabel(m.compressionAlgo)}))
 		} else {
-			// Only use compression if it reduced the size
-			if buf.Len() < len(msg) {
-				msg = buf.Bytes()
-			}
+			// Compression didn't shrink the payload; fall back to the
+			// uncompressed bytes so we don't pay encryption / network cost
+			// on a worse-than-original payload.
+			metrics.IncrCounterWithLabels([]string{"memberlist", "compress", "skipped_size"}, 1,
+				append(m.metricLabels, metrics.Label{Name: "algo", Value: algoLabel(m.compressionAlgo)}))
 		}
 	}
 
@@ -895,11 +896,24 @@ func (m *Memberlist) rawSendMsgPacket(a Address, node *Node, msg []byte) error {
 func (m *Memberlist) rawSendMsgStream(conn net.Conn, sendBuf []byte, streamLabel string) error {
 	// Check if compression is enabled
 	if m.config.EnableCompression {
-		compBuf, err := compressPayload(sendBuf, m.config.MsgpackUseNewTimeFormat)
+		compBuf, err := compressPayload(m.compressionAlgo, sendBuf, m.config.MsgpackUseNewTimeFormat)
 		if err != nil {
+			metrics.IncrCounterWithLabels([]string{"memberlist", "compress", "error"}, 1,
+				append(m.metricLabels,
+					metrics.Label{Name: "algo", Value: algoLabel(m.compressionAlgo)},
+					metrics.Label{Name: "op", Value: "encode"}))
 			m.logger.Printf("[ERROR] memberlist: Failed to compress payload: %v", err)
-		} else {
+		} else if compBuf.Len() < len(sendBuf) {
+			// Compression reduced the size; emit the compressed bytes.
 			sendBuf = compBuf.Bytes()
+			metrics.IncrCounterWithLabels([]string{"memberlist", "compress", "encoded"}, 1,
+				append(m.metricLabels, metrics.Label{Name: "algo", Value: algoLabel(m.compressionAlgo)}))
+		} else {
+			// Compression didn't shrink the payload; fall back to the
+			// uncompressed bytes so we don't pay encryption / network cost
+			// on a worse-than-original payload. Mirrors rawSendMsgPacket.
+			metrics.IncrCounterWithLabels([]string{"memberlist", "compress", "skipped_size"}, 1,
+				append(m.metricLabels, metrics.Label{Name: "algo", Value: algoLabel(m.compressionAlgo)}))
 		}
 	}
 
@@ -1213,8 +1227,14 @@ func (m *Memberlist) readStream(conn net.Conn, streamLabel string) (messageType,
 		}
 		decomp, err := decompressBuffer(&c)
 		if err != nil {
+			metrics.IncrCounterWithLabels([]string{"memberlist", "compress", "error"}, 1,
+				append(m.metricLabels,
+					metrics.Label{Name: "algo", Value: algoLabel(c.Algo)},
+					metrics.Label{Name: "op", Value: "decode"}))
 			return 0, nil, nil, err
 		}
+		metrics.IncrCounterWithLabels([]string{"memberlist", "compress", "decoded"}, 1,
+			append(m.metricLabels, metrics.Label{Name: "algo", Value: algoLabel(c.Algo)}))
 
 		// Reset the message type
 		msgType = messageType(decomp[0])

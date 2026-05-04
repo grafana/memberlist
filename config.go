@@ -186,6 +186,22 @@ type Config struct {
 	// utilization. This is only available starting at protocol version 1.
 	EnableCompression bool
 
+	// CompressionAlgorithm selects which algorithm is used to compress
+	// outgoing messages when EnableCompression is true. Defaults to LZW for
+	// backward compatibility. Receivers always decode every algorithm they
+	// understand independently of this setting; senders only emit one.
+	// Empty string is treated as LZW.
+	//
+	// The value is read once at Create / newMemberlist time and cached on
+	// the resulting *Memberlist. Mutating this field after construction
+	// has no effect on outgoing messages.
+	//
+	// IMPORTANT: every node in the cluster must run a build that supports
+	// the selected algorithm before any node is configured to emit it.
+	// Mixing a snappy sender with an old LZW-only receiver causes the
+	// receiver to drop the message.
+	CompressionAlgorithm CompressionAlgorithm
+
 	// SecretKey is used to initialize the primary encryption key in a keyring.
 	// The primary encryption key is the only key used to encrypt messages and
 	// the first key used while attempting to decrypt messages. Providing a
@@ -333,7 +349,8 @@ func DefaultLANConfig() *Config {
 		GossipVerifyIncoming: true,
 		GossipVerifyOutgoing: true,
 
-		EnableCompression: true, // Enable compression by default
+		EnableCompression:    true, // Enable compression by default
+		CompressionAlgorithm: CompressionAlgorithmLZW,
 
 		SecretKey: nil,
 		Keyring:   nil,

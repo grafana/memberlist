@@ -84,6 +84,11 @@ type Memberlist struct {
 
 	// metricLabels is the slice of labels to put on all emitted metrics
 	metricLabels []metrics.Label
+
+	// compressionAlgo is the wire-level algorithm tag derived from
+	// config.CompressionAlgorithm at construction time. Cached here so
+	// per-message send paths avoid string parsing.
+	compressionAlgo compressionType
 }
 
 // BuildVsnArray creates the array of Vsn
@@ -206,6 +211,11 @@ func newMemberlist(conf *Config) (*Memberlist, error) {
 		}
 	}
 
+	algo, err := resolveCompressionAlgorithm(conf.CompressionAlgorithm)
+	if err != nil {
+		return nil, err
+	}
+
 	m := &Memberlist{
 		config:               conf,
 		shutdownCh:           make(chan struct{}),
@@ -221,6 +231,7 @@ func newMemberlist(conf *Config) (*Memberlist, error) {
 		broadcasts:           &TransmitLimitedQueue{RetransmitMult: conf.RetransmitMult},
 		logger:               logger,
 		metricLabels:         conf.MetricLabels,
+		compressionAlgo:      algo,
 	}
 	m.broadcasts.NumNodes = func() int {
 		return m.estNumNodes()

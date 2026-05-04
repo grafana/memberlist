@@ -503,14 +503,18 @@ func TestDecodeCompoundMessage_Trunc(t *testing.T) {
 }
 
 func TestCompressDecompressPayload(t *testing.T) {
-	buf, err := compressPayload([]byte("testing"), false)
+	buf, err := compressPayload(lzwAlgo, []byte("testing"), false)
 	if err != nil {
 		t.Fatalf("unexpected err: %s", err)
 	}
+	defer releaseBuffer(buf)
 
-	decomp, err := decompressPayload(buf.Bytes()[1:])
+	algo, decomp, err := decompressPayload(buf.Bytes()[1:])
 	if err != nil {
 		t.Fatalf("unexpected err: %s", err)
+	}
+	if algo != lzwAlgo {
+		t.Fatalf("bad algo: %d", algo)
 	}
 
 	if !reflect.DeepEqual(decomp, []byte("testing")) {
