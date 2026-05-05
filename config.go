@@ -195,11 +195,6 @@ type Config struct {
 	// The value is read once at Create / newMemberlist time and cached on
 	// the resulting *Memberlist. Mutating this field after construction
 	// has no effect on outgoing messages.
-	//
-	// IMPORTANT: every node in the cluster must run a build that supports
-	// the selected algorithm before any node is configured to emit it.
-	// Mixing a snappy sender with an old LZW-only receiver causes the
-	// receiver to drop the message.
 	CompressionAlgorithm CompressionAlgorithm
 
 	// SecretKey is used to initialize the primary encryption key in a keyring.
@@ -316,6 +311,11 @@ func ParseCIDRs(v []string) ([]net.IPNet, error) {
 	return nets, errs
 }
 
+// defaultUDPBufferSize is the default value used for Config.UDPBufferSize.
+// 1400 bytes leaves comfortable headroom under the standard 1500-byte
+// Ethernet MTU once IP/UDP headers are accounted for.
+const defaultUDPBufferSize = 1400
+
 // DefaultLANConfig returns a sane set of configurations for Memberlist.
 // It uses the hostname as the node name, and otherwise sets very conservative
 // values that are sane for most LAN environments. The default configuration
@@ -358,7 +358,7 @@ func DefaultLANConfig() *Config {
 		DNSConfigPath: "/etc/resolv.conf",
 
 		HandoffQueueDepth: 1024,
-		UDPBufferSize:     1400,
+		UDPBufferSize:     defaultUDPBufferSize,
 		CIDRsAllowed:      nil, // same as allow all
 
 		QueueCheckInterval: 30 * time.Second,

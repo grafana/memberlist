@@ -40,11 +40,7 @@ func decode(buf []byte, out interface{}) error {
 // encode writes an encoded object to a new bytes buffer.
 //
 // The returned buffer is NOT pooled because the encoded bytes can outlive
-// the immediate call: dskit's TCPTransport.WriteTo (and similar async
-// transports) hand the slice off to a writer goroutine via a channel, so
-// the bytes must be GC-managed. The compression scratch buffer used inside
-// compressPayload is pooled separately and is only held for the duration
-// of the compress call.
+// the immediate call.
 func encode(msgType messageType, in interface{}, msgpackUseNewTimeFormat bool) (*bytes.Buffer, error) {
 	buf := bytes.NewBuffer(nil)
 	buf.WriteByte(uint8(msgType))
@@ -221,7 +217,7 @@ func makeCompoundMessages(msgs [][]byte) []*bytes.Buffer {
 // makeCompoundMessage takes a list of messages and generates a single
 // compound message containing all of them. The returned buffer is owned by
 // the caller; its bytes can be passed to an async transport so it is not
-// pooled (see the comment on encode for context).
+// pooled.
 func makeCompoundMessage(msgs [][]byte) *bytes.Buffer {
 	buf := bytes.NewBuffer(nil)
 

@@ -17,27 +17,20 @@ import (
 // memberlist messages when Config.EnableCompression is true. Receivers
 // always decode every algorithm they understand, independent of this
 // setting; the field only controls what a sender emits.
-//
-// IMPORTANT: every node in the cluster must run a build that supports the
-// selected algorithm before any node is configured to emit it. Mixing a
-// snappy sender with an old LZW-only receiver causes the receiver to drop
-// the message.
 type CompressionAlgorithm string
 
 const (
-	// CompressionAlgorithmLZW selects compress/lzw. This is the historical
+	// CompressionAlgorithmLZW selects lzw compression. This is the historical
 	// default and the only algorithm understood by older builds.
 	CompressionAlgorithmLZW CompressionAlgorithm = "lzw"
 
-	// CompressionAlgorithmSnappy selects github.com/golang/snappy. Snappy uses
+	// CompressionAlgorithmSnappy selects snappy compression. This uses
 	// substantially less CPU and allocates less than LZW for similar
-	// bandwidth. Only emit snappy after every cluster member runs a build
-	// that can decode it.
+	// bandwidth.
 	CompressionAlgorithmSnappy CompressionAlgorithm = "snappy"
 )
 
-// resolveCompressionAlgorithm maps the public string-valued algorithm
-// selector to the wire-level compressionType byte. Empty string is treated
+// resolveCompressionAlgorithm maps algo to the wire-level compressionType byte. Empty string is treated
 // as LZW for backward compatibility with bare Config{} construction.
 func resolveCompressionAlgorithm(algo CompressionAlgorithm) (compressionType, error) {
 	switch algo {
@@ -50,7 +43,7 @@ func resolveCompressionAlgorithm(algo CompressionAlgorithm) (compressionType, er
 	}
 }
 
-// algoLabel returns a stable string for use as a metric label.
+// algoLabel converts algo to a stable string for use as a metric label.
 func algoLabel(algo compressionType) string {
 	switch algo {
 	case lzwAlgo:
@@ -96,7 +89,7 @@ const (
 // inside lzwCompress. The buffer is acquired and released within a single
 // compressPayload call; it never escapes to the network or is held across
 // goroutines, so it is safe to pool here even though the encode() output
-// buffer is not (see encode in util.go).
+// buffer is not (see encode function).
 //
 // Tuning is for LZW scratch sizes only — do NOT reuse this pool for other
 // callers without revisiting maxPooledCompressBufCap.
@@ -121,8 +114,7 @@ func releaseBuffer(b *bytes.Buffer) {
 }
 
 // bytesReaderPool recycles *bytes.Reader values used as the source reader
-// for the LZW decoder. Reset(b []byte) replaces the underlying slice
-// without allocation; available since Go 1.7. Callers MUST Reset(nil) before
+// for the LZW decoder. Callers MUST Reset(nil) before
 // Put to avoid pinning the previous src slice in the pool.
 var bytesReaderPool = sync.Pool{
 	New: func() any {
@@ -147,22 +139,24 @@ var lzwWriterPool = sync.Pool{
 	},
 }
 
-// lzwReaderPool recycles compress/lzw decoder state machines. We type-assert
-// the io.ReadCloser returned by lzw.NewReader to the concrete *lzw.Reader so
-// we can call Reset on subsequent Gets. Same Reset-zeros-all-state assumption
-// as lzwWriterPool.
+// lzwReaderPool recycles compress/lzw decoder state machines.
+// Same Reset-zeros-all-state assumption as lzwWriterPool.
 var lzwReaderPool = sync.Pool{
 	New: func() any {
+		// Type-assert *lzw.Reader so we can call Reset on subsequent Gets.
 		return lzw.NewReader(emptyBytesReader, lzw.LSB, lzwLitWidth).(*lzw.Reader)
 	},
 }
 
 // snappyEncodeBufPool recycles destination slices for snappy.Encode.
-// Initial capacity matches the default UDPBufferSize so typical gossip
-// payloads don't grow the underlying array on first use.
+// Initial capacity is the default UDPBufferSize plus a small headroom for
+// the snappy frame's varint length prefix and minor expansion of
+// incompressible payloads. The total (~1500 bytes) matches the standard
+// Ethernet MTU, so a typical gossip-sized encode will not grow the
+// underlying array on first use.
 var snappyEncodeBufPool = sync.Pool{
 	New: func() any {
-		b := make([]byte, 0, 1500)
+		b := make([]byte, 0, defaultUDPBufferSize+100)
 		return &b
 	},
 }
@@ -176,11 +170,11 @@ func putSnappyEncodeBuf(p *[]byte) {
 }
 
 // compressPayload takes an opaque input buffer, compresses it using the
-// requested algorithm, and wraps the result in a compress{} message that
+// requested algo, and wraps the result in a compress{} message that
 // is encoded as a compressMsg frame.
 //
 // The returned *bytes.Buffer is owned by the caller. It comes from encode()
-// (which doesn't pool — see the comment there) and is released by the GC.
+// (which doesn't pool) and is released by the GC.
 func compressPayload(algo compressionType, inp []byte, msgpackUseNewTimeFormat bool) (*bytes.Buffer, error) {
 	var encoded []byte
 	switch algo {
@@ -221,7 +215,7 @@ const unknownAlgo compressionType = 255
 //
 // On wrapper-decode failure (the compress{} frame itself is malformed) the
 // returned algo is unknownAlgo so the caller's error metric is not falsely
-// labelled as the lzwAlgo zero value.
+// labeled as the lzwAlgo zero value.
 func decompressPayload(msg []byte) (compressionType, []byte, error) {
 	var c compress
 	if err := decode(msg, &c); err != nil {
@@ -245,40 +239,34 @@ func decompressBuffer(c *compress) ([]byte, error) {
 	}
 }
 
-// lzwCompress compresses src using compress/lzw and returns the pooled
+// lzwCompress compresses src using lzw and returns the pooled
 // scratch buffer holding the encoded bytes. The caller MUST releaseBuffer
-// the returned buffer once the bytes are no longer needed (typically via
-// defer right after a non-error return).
+// the returned buffer once the bytes are no longer needed.
 func lzwCompress(src []byte) (*bytes.Buffer, error) {
 	buf := getBuffer()
 	w := lzwWriterPool.Get().(*lzw.Writer)
+	// The writer is reusable after the next Reset, so we return it to the
+	// pool unconditionally.
+	defer lzwWriterPool.Put(w)
 	w.Reset(buf, lzw.LSB, lzwLitWidth)
 
 	if _, err := w.Write(src); err != nil {
 		_ = w.Close()
-		lzwWriterPool.Put(w)
 		releaseBuffer(buf)
 		return nil, err
 	}
-	// Close flushes any pending output. The writer is reusable after the
-	// next Reset, so we return it to the pool unconditionally.
 	if err := w.Close(); err != nil {
-		lzwWriterPool.Put(w)
 		releaseBuffer(buf)
 		return nil, err
 	}
-	lzwWriterPool.Put(w)
 
 	return buf, nil
 }
 
 // maxLZWDecompressedBytes bounds the decompressed size of a single LZW
 // payload. memberlist's TCP push-pull is capped at maxPushStateBytes
-// (20 MiB compressed) and UDP packets at UDPBufferSize (1400 bytes). In
-// practice dskit's Proto codec already snappy-compresses KV values
-// before memberlist sees them, so memberlist's LZW achieves ~1:1 on
-// real traffic and decompressed size ≈ compressed size — well under
-// 64 MiB. Anything larger indicates a malformed peer or a decompression
+// (20 MiB compressed) and UDP packets at UDPBufferSize (1400 bytes).
+// Anything larger indicates a malformed peer or a decompression
 // bomb (LZW can expand small inputs by orders of magnitude on highly
 // redundant data — e.g., 20 MiB compressed → 2 GiB+ decompressed in the
 // worst case for a crafted payload).
@@ -293,10 +281,9 @@ func lzwDecompress(src []byte) ([]byte, error) {
 	r := lzwReaderPool.Get().(*lzw.Reader)
 	defer lzwReaderPool.Put(r)
 	br := bytesReaderPool.Get().(*bytes.Reader)
-	// Defers are LIFO; Reset(nil) runs before Put, so the pooled reader
-	// doesn't pin src across the next Get. Two top-level defers stay
-	// open-coded (Go 1.14+); a defer of an anonymous closure would heap-
-	// allocate the closure literal.
+	// Reset(nil) runs before Put, so the pooled reader doesn't pin src across
+	// the next Get. Two top-level defers stay open-coded;
+	// a defer of an anonymous closure would heap-allocate the closure literal.
 	defer bytesReaderPool.Put(br)
 	defer br.Reset(nil)
 	br.Reset(src)
@@ -315,7 +302,7 @@ func lzwDecompress(src []byte) ([]byte, error) {
 	var buf bytes.Buffer
 	if _, err := io.Copy(&buf, &lr); err != nil {
 		_ = r.Close()
-		return nil, err
+		return nil, fmt.Errorf("lzwDecompress: read from src: %w", err)
 	}
 	_ = r.Close()
 	if buf.Len() > maxLZWDecompressedBytes {
@@ -324,14 +311,11 @@ func lzwDecompress(src []byte) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-// snappyCompress compresses src using github.com/golang/snappy and returns a
+// snappyCompress compresses src using snappy and returns a
 // pointer to the pooled destination slice. The caller MUST putSnappyEncodeBuf
-// the returned pointer once the bytes are no longer needed (typically via
-// defer right after a non-error return).
+// the returned pointer once the bytes are no longer needed.
 func snappyCompress(src []byte) (*[]byte, error) {
 	bufPtr := snappyEncodeBufPool.Get().(*[]byte)
-	// snappy.Encode appends into bufPtr; if cap is too small it allocates
-	// a new slice. Either way the result is what we use.
 	*bufPtr = snappy.Encode((*bufPtr)[:0], src)
 	return bufPtr, nil
 }
@@ -341,10 +325,9 @@ func snappyCompress(src []byte) (*[]byte, error) {
 // varint header at the start of src — up to 2^32-1 on 64-bit systems — and
 // snappy.Decode allocates that many bytes before any data is actually
 // decoded. A malicious peer could send a tiny frame claiming a multi-GiB
-// decoded length to trigger out-of-memory.
-//
-// Match the LZW cap so both decoders share the same defense-in-depth ceiling.
-const maxSnappyDecompressedBytes = 64 * 1024 * 1024
+// decoded length to trigger out-of-memory. Tracks the LZW cap so both
+// decoders share the same defense-in-depth ceiling.
+const maxSnappyDecompressedBytes = maxLZWDecompressedBytes
 
 // snappyDecompress returns a freshly allocated []byte holding the
 // decompressed payload. snappy.Decode writes into the right-sized dst we
@@ -356,7 +339,7 @@ const maxSnappyDecompressedBytes = 64 * 1024 * 1024
 func snappyDecompress(src []byte) ([]byte, error) {
 	n, err := snappy.DecodedLen(src)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("snappy.DecodedLen: %w", err)
 	}
 	if n > maxSnappyDecompressedBytes {
 		return nil, fmt.Errorf("memberlist: snappy-decompressed payload would exceed %d bytes (claimed %d)", maxSnappyDecompressedBytes, n)
