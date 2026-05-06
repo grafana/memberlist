@@ -221,6 +221,33 @@ func TestEncodeBuffer_Reused(t *testing.T) {
 	require.Less(t, allocs, 0.5, "expected encode pool to amortize allocations to ~0/op")
 }
 
+// TestPushPullBuffer_Reused is the push-pull-pool counterpart of
+// TestEncodeBuffer_Reused.
+func TestPushPullBuffer_Reused(t *testing.T) {
+	allocs := testing.AllocsPerRun(1000, func() {
+		b := getPushPullBuffer()
+		b.WriteString("hello")
+		releasePushPullBuffer(b)
+	})
+	require.Less(t, allocs, 0.5, "expected push-pull pool to amortize allocations to ~0/op")
+}
+
+// TestReleasePushPullBuffer_BoundedCap is the push-pull-pool counterpart
+// of TestReleaseEncodeBuffer_BoundedCap.
+func TestReleasePushPullBuffer_BoundedCap(t *testing.T) {
+	big := getPushPullBuffer()
+	big.Write(make([]byte, maxPooledPushPullBufCap+1))
+	require.Greater(t, big.Cap(), maxPooledPushPullBufCap)
+
+	releasePushPullBuffer(big)
+	for i := range 10 {
+		b := getPushPullBuffer()
+		require.LessOrEqual(t, b.Cap(), maxPooledPushPullBufCap,
+			"oversized buffer leaked through push-pull pool on iteration %d", i)
+		releasePushPullBuffer(b)
+	}
+}
+
 // TestPrecomputedMetricLabels guards the cap-trim invariant on the
 // hot-path label slices: appending to compressMetricLabels must NOT
 // mutate metricLabels (or the precomputed slice's backing array would
@@ -531,6 +558,38 @@ func BenchmarkMakeCompoundMessage(b *testing.B) {
 				}
 			})
 		}
+	}
+}
+
+// BenchmarkEncryptLocalState measures the TCP push-pull encryption path,
+// covering the new pushPullBufPool. Sized to span the small (single-node
+// gossip ack) through medium and large (push-pull-state) cases. The
+// encrypted buffer is released to the pool every iteration to reflect
+// steady-state pool-warm cost.
+func BenchmarkEncryptLocalState(b *testing.B) {
+	keyring, err := NewKeyring(nil, TestKeys[0])
+	require.NoError(b, err)
+
+	conf := DefaultLANConfig()
+	conf.Keyring = keyring
+	conf.GossipVerifyOutgoing = true
+
+	// Build a minimal Memberlist with the bits encryptLocalState needs;
+	// avoiding newMemberlist here keeps the bench setup independent of
+	// network transport availability.
+	m := &Memberlist{config: conf}
+
+	sizes := []int{1024, 64 * 1024, 1 << 20} // 1 KiB, 64 KiB, 1 MiB
+	for _, sz := range sizes {
+		sendBuf := randBytes(sz)
+		b.Run(fmt.Sprintf("%d", sz), func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				buf, err := m.encryptLocalState(sendBuf, "")
+				require.NoError(b, err)
+				releasePushPullBuffer(buf)
+			}
+		})
 	}
 }
 

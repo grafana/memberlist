@@ -928,12 +928,13 @@ func (m *Memberlist) rawSendMsgStream(conn net.Conn, sendBuf []byte, streamLabel
 
 	// Check if encryption is enabled
 	if m.config.EncryptionEnabled() && m.config.GossipVerifyOutgoing {
-		crypt, err := m.encryptLocalState(sendBuf, streamLabel)
+		cryptBuf, err := m.encryptLocalState(sendBuf, streamLabel)
 		if err != nil {
 			m.logger.Printf("[ERROR] memberlist: Failed to encrypt local state: %v", err)
 			return err
 		}
-		sendBuf = crypt
+		defer releasePushPullBuffer(cryptBuf)
+		sendBuf = cryptBuf.Bytes()
 	}
 
 	// Write out the entire send buffer
@@ -962,7 +963,8 @@ func (m *Memberlist) sendUserMsg(a Address, sendBuf []byte) error {
 		_ = conn.Close()
 	}()
 
-	bufConn := bytes.NewBuffer(nil)
+	bufConn := getPushPullBuffer()
+	defer releasePushPullBuffer(bufConn)
 	if err := bufConn.WriteByte(byte(userMsg)); err != nil {
 		return err
 	}
@@ -1078,8 +1080,12 @@ func (m *Memberlist) sendLocalState(conn net.Conn, join bool, streamLabel string
 		userData = m.config.Delegate.LocalState(join)
 	}
 
-	// Create a bytes buffer writer
-	bufConn := bytes.NewBuffer(nil)
+	// Create a bytes buffer writer drawn from the push-pull pool: state
+	// can approach maxPushStateBytes (20 MiB), so reusing a large
+	// pre-grown buffer avoids the cost of growing from zero on every
+	// push-pull.
+	bufConn := getPushPullBuffer()
+	defer releasePushPullBuffer(bufConn)
 
 	// Send our node state
 	header := pushPullHeader{Nodes: len(localNodes), UserStateLen: len(userData), Join: join}
@@ -1114,9 +1120,12 @@ func (m *Memberlist) sendLocalState(conn net.Conn, join bool, streamLabel string
 	return m.rawSendMsgStream(conn, bufConn.Bytes(), streamLabel)
 }
 
-// encryptLocalState is used to help encrypt local state before sending
-func (m *Memberlist) encryptLocalState(sendBuf []byte, streamLabel string) ([]byte, error) {
-	var buf bytes.Buffer
+// encryptLocalState encrypts a local-state payload for stream send. The
+// returned *bytes.Buffer is drawn from pushPullBufPool; the caller MUST
+// releasePushPullBuffer it once the bytes have been consumed. On error
+// nil is returned and any pool buffer has already been released.
+func (m *Memberlist) encryptLocalState(sendBuf []byte, streamLabel string) (*bytes.Buffer, error) {
+	buf := getPushPullBuffer()
 
 	// Write the encryptMsg byte
 	buf.WriteByte(byte(encryptMsg))
@@ -1136,17 +1145,20 @@ func (m *Memberlist) encryptLocalState(sendBuf []byte, streamLabel string) ([]by
 
 	// Write the encrypted cipher text to the buffer
 	key := m.config.Keyring.GetPrimaryKey()
-	err := encryptPayload(encVsn, key, sendBuf, dataBytes, &buf)
-	if err != nil {
+	if err := encryptPayload(encVsn, key, sendBuf, dataBytes, buf); err != nil {
+		releasePushPullBuffer(buf)
 		return nil, err
 	}
-	return buf.Bytes(), nil
+	return buf, nil
 }
 
 // decryptRemoteState is used to help decrypt the remote state
 func (m *Memberlist) decryptRemoteState(bufConn io.Reader, streamLabel string) ([]byte, error) {
-	// Read in enough to determine message length
-	cipherText := bytes.NewBuffer(nil)
+	// Read in enough to determine message length. Use the push-pull pool:
+	// the cipher text scales with maxPushStateBytes and is dropped after
+	// decryptPayload returns the freshly-allocated plaintext.
+	cipherText := getPushPullBuffer()
+	defer releasePushPullBuffer(cipherText)
 	cipherText.WriteByte(byte(encryptMsg))
 	_, err := io.CopyN(cipherText, bufConn, 4)
 	if err != nil {

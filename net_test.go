@@ -769,9 +769,10 @@ func TestEncryptDecryptState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
+	defer releasePushPullBuffer(crypt)
 
 	// Create reader, seek past the type byte
-	buf := bytes.NewReader(crypt)
+	buf := bytes.NewReader(crypt.Bytes())
 	if _, err := buf.Seek(1, 0); err != nil {
 		t.Fatalf("err: %v", err)
 	}

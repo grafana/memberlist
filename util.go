@@ -83,6 +83,56 @@ func releaseEncodeBuffers(bufs []*bytes.Buffer) {
 	}
 }
 
+// pushPullBufPool recycles *bytes.Buffer values used on the TCP push-pull
+// path and other large-buffer call sites (sendLocalState, encryptLocalState,
+// decryptRemoteState, sendUserMsg). Push-pull state can approach
+// maxPushStateBytes (20 MiB), which exceeds encodeBufPool's cap policy by a
+// long way; a dedicated pool with its own ceiling lets us reuse those
+// large buffers without bloating the encode pool's idle footprint.
+//
+// Pool callers MUST releasePushPullBuffer once they are done with the
+// returned buffer's bytes.
+var pushPullBufPool = sync.Pool{
+	New: func() any {
+		return new(bytes.Buffer)
+	},
+}
+
+// maxPooledPushPullBufCap bounds the capacity of buffers retained by
+// pushPullBufPool. Sized to cover maxPushStateBytes (20 MiB) plus headroom
+// for the AEAD overhead added by encryptLocalState. Buffers that grow
+// above this — degenerate or attack payloads — are dropped on release.
+//
+// This cap is for pool sizing only; it is NOT a security boundary. Size
+// enforcement against malicious peers lives at decryptRemoteState's
+// explicit `moreBytes > maxPushStateBytes` check (net.go) — do not rely
+// on this constant to reject oversized incoming state.
+const maxPooledPushPullBufCap = 32 * 1024 * 1024
+
+// pushPullBufInitialCap is the initial backing-slice capacity for fresh
+// buffers from pushPullBufPool. Push-pull state on a small cluster fits
+// well under 64 KiB, so 64 KiB lets typical encodes proceed without the
+// first few growth steps. Buffers grow naturally beyond this when a peer
+// has more state to ship.
+const pushPullBufInitialCap = 64 * 1024
+
+func getPushPullBuffer() *bytes.Buffer {
+	b := pushPullBufPool.Get().(*bytes.Buffer)
+	b.Reset()
+	if b.Cap() < pushPullBufInitialCap {
+		b.Grow(pushPullBufInitialCap)
+	}
+	return b
+}
+
+func releasePushPullBuffer(b *bytes.Buffer) {
+	if b.Cap() > maxPooledPushPullBufCap {
+		return
+	}
+	b.Reset()
+	pushPullBufPool.Put(b)
+}
+
 // encode writes an encoded object to a buffer drawn from encodeBufPool.
 // On success the caller MUST releaseEncodeBuffer the returned buffer
 // once its bytes are no longer needed; typical usage is
