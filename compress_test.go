@@ -248,35 +248,56 @@ func TestReleasePushPullBuffer_BoundedCap(t *testing.T) {
 	}
 }
 
-// TestPrecomputedMetricLabels guards the cap-trim invariant on the
-// hot-path label slices: appending to compressMetricLabels must NOT
-// mutate metricLabels (or the precomputed slice's backing array would
-// alias and the next append would race with concurrent reads). Also
-// verifies the algo / reason labels are present and correctly ordered.
-func TestPrecomputedMetricLabels(t *testing.T) {
+func TestMemberlist_initMetricLabels(t *testing.T) {
 	base := []metrics.Label{{Name: "cluster", Value: "test"}}
+	m := &Memberlist{
+		metricLabels:    base,
+		compressionAlgo: snappyAlgo,
+	}
+	m.initMetricLabels()
 
-	// withAlgoLabel: result preserves base, appends {algo: lzw}, and
-	// has cap == len so subsequent appends don't mutate it.
-	got := withAlgoLabel(base, "lzw")
+	// Compress side.
 	require.Equal(t, []metrics.Label{
 		{Name: "cluster", Value: "test"},
-		{Name: "algo", Value: "lzw"},
-	}, got)
-	require.Equal(t, len(got), cap(got), "withAlgoLabel must cap-trim")
-
-	// Mutating base must not bleed into got.
-	base[0] = metrics.Label{Name: "cluster", Value: "other"}
-	require.Equal(t, "test", got[0].Value)
-
-	// withReasonLabel layers on top — used for compressSkippedSizeWorseLabels.
-	skipped := withReasonLabel(got, "size_worse_than_original")
+		{Name: "algo", Value: "snappy"},
+	}, m.compressMetricLabels)
+	require.Equal(t, len(m.compressMetricLabels), cap(m.compressMetricLabels),
+		"compressMetricLabels must cap-trim")
 	require.Equal(t, []metrics.Label{
 		{Name: "cluster", Value: "test"},
-		{Name: "algo", Value: "lzw"},
+		{Name: "algo", Value: "snappy"},
 		{Name: "reason", Value: "size_worse_than_original"},
-	}, skipped)
-	require.Equal(t, len(skipped), cap(skipped), "withReasonLabel must cap-trim")
+	}, m.compressSkippedSizeWorseLabels)
+	require.Equal(t, len(m.compressSkippedSizeWorseLabels), cap(m.compressSkippedSizeWorseLabels),
+		"compressSkippedSizeWorseLabels must cap-trim")
+
+	// Decompress side — exercise via the production decompressLabels()
+	// dispatch so we cover both the field contents and the function.
+	require.Equal(t, []metrics.Label{
+		{Name: "cluster", Value: "test"},
+		{Name: "algo", Value: "lzw"},
+	}, m.decompressLabels(lzwAlgo))
+	require.Equal(t, len(m.decompressLabels(lzwAlgo)), cap(m.decompressLabels(lzwAlgo)),
+		"decompressMetricLabels[lzwAlgo] must cap-trim")
+
+	require.Equal(t, []metrics.Label{
+		{Name: "cluster", Value: "test"},
+		{Name: "algo", Value: "snappy"},
+	}, m.decompressLabels(snappyAlgo))
+	require.Equal(t, len(m.decompressLabels(snappyAlgo)), cap(m.decompressLabels(snappyAlgo)),
+		"decompressMetricLabels[snappyAlgo] must cap-trim")
+	require.Equal(t, []metrics.Label{
+		{Name: "cluster", Value: "test"},
+		{Name: "algo", Value: "unknown"},
+	}, m.decompressLabels(unknownAlgo))
+
+	// Mutation safety: poisoning base after init must not affect any
+	// precomputed slice.
+	base[0] = metrics.Label{Name: "cluster", Value: "other"}
+	require.Equal(t, "test", m.compressMetricLabels[0].Value)
+	require.Equal(t, "test", m.compressSkippedSizeWorseLabels[0].Value)
+	require.Equal(t, "test", m.decompressLabels(lzwAlgo)[0].Value)
+	require.Equal(t, "test", m.decompressLabels(snappyAlgo)[0].Value)
 }
 
 // TestDecompressErrors covers all decompress-side error paths: per-algorithm
@@ -576,8 +597,12 @@ func BenchmarkEncryptLocalState(b *testing.B) {
 
 	// Build a minimal Memberlist with the bits encryptLocalState needs;
 	// avoiding newMemberlist here keeps the bench setup independent of
-	// network transport availability.
+	// network transport availability. initMetricLabels is called so the
+	// bench remains valid if encryptLocalState (or the encryption path
+	// it sits on) ever gains metric instrumentation that reads the
+	// precomputed label slices.
 	m := &Memberlist{config: conf}
+	m.initMetricLabels()
 
 	sizes := []int{1024, 64 * 1024, 1 << 20} // 1 KiB, 64 KiB, 1 MiB
 	for _, sz := range sizes {

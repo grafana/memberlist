@@ -753,17 +753,40 @@ func (m *Memberlist) handleUser(buf []byte, from net.Addr) {
 	}
 }
 
+// decompressLabels returns the precomputed metric label slice for algo on
+// the receive path. Each known algo gets a dedicated case keyed to a
+// named precomputed field; adding a new compressionType requires another
+// case. Forgetting to add the case is not a compile error — the default
+// arm builds a fresh slice via withLabel, so the new algo's metrics still
+// emit correctly but pay an allocation per call.
+//
+// Unknown algos (including unknownAlgo from a wrapper-decode failure)
+// also fall through to the default arm.
+func (m *Memberlist) decompressLabels(algo compressionType) []metrics.Label {
+	switch algo {
+	case lzwAlgo:
+		return m.decompressLZWLabels
+	case snappyAlgo:
+		return m.decompressSnappyLabels
+	default:
+		return withLabel(m.metricLabels, "algo", algoLabel(algo))
+	}
+}
+
 // handleCompressed is used to unpack a compressed message
 func (m *Memberlist) handleCompressed(buf []byte, from net.Addr, timestamp time.Time) {
 	algo, payload, err := decompressPayload(buf)
+	// attempts_total is incremented unconditionally (mirroring the compress
+	// side's `compress_attempts_total`). On wrapper-decode failure algo is
+	// unknownAlgo, which surfaces as algo="unknown" via decompressLabels.
+	metrics.IncrCounterWithLabels(metricDecompressAttempts, 1,
+		m.decompressLabels(algo))
 	if err != nil {
-		metrics.IncrCounterWithLabels([]string{"memberlist", "decompress", "errors_total"}, 1,
+		metrics.IncrCounterWithLabels(metricDecompressErrors, 1,
 			m.decompressLabels(algo))
 		m.logger.Printf("[ERR] memberlist: Failed to decompress payload: %v %s", err, LogAddress(from))
 		return
 	}
-	metrics.IncrCounterWithLabels([]string{"memberlist", "decompress", "total"}, 1,
-		m.decompressLabels(algo))
 
 	// Recursively handle the payload
 	m.handleCommand(payload, from, timestamp)
@@ -825,13 +848,13 @@ func (m *Memberlist) rawSendMsgPacket(a Address, node *Node, msg []byte) error {
 
 	// Check if we have compression enabled
 	if m.config.EnableCompression {
-		metrics.IncrCounterWithLabels([]string{"memberlist", "compress", "attempts_total"}, 1,
+		metrics.IncrCounterWithLabels(metricCompressAttempts, 1,
 			m.compressMetricLabels)
 		buf, err := compressPayload(m.compressionAlgo, msg, m.config.MsgpackUseNewTimeFormat)
 		if err != nil {
 			// Compression failed — fall back to plaintext to avoid paying
 			// encryption + network cost on a payload we couldn't shrink.
-			metrics.IncrCounterWithLabels([]string{"memberlist", "compress", "errors_total"}, 1,
+			metrics.IncrCounterWithLabels(metricCompressErrors, 1,
 				m.compressMetricLabels)
 			m.logger.Printf("[WARN] memberlist: Failed to compress payload: %v", err)
 		} else {
@@ -843,7 +866,7 @@ func (m *Memberlist) rawSendMsgPacket(a Address, node *Node, msg []byte) error {
 				// Compressed payload was no smaller than the input — fall
 				// back to plaintext to avoid paying encryption + network
 				// cost on a worse-than-original payload.
-				metrics.IncrCounterWithLabels([]string{"memberlist", "compress", "skipped_total"}, 1,
+				metrics.IncrCounterWithLabels(metricCompressSkipped, 1,
 					m.compressSkippedSizeWorseLabels)
 			}
 		}
@@ -902,12 +925,12 @@ func (m *Memberlist) rawSendMsgPacket(a Address, node *Node, msg []byte) error {
 func (m *Memberlist) rawSendMsgStream(conn net.Conn, sendBuf []byte, streamLabel string) error {
 	// Check if compression is enabled
 	if m.config.EnableCompression {
-		metrics.IncrCounterWithLabels([]string{"memberlist", "compress", "attempts_total"}, 1,
+		metrics.IncrCounterWithLabels(metricCompressAttempts, 1,
 			m.compressMetricLabels)
 		compBuf, err := compressPayload(m.compressionAlgo, sendBuf, m.config.MsgpackUseNewTimeFormat)
 		if err != nil {
 			// Compression failed — fall back to plaintext.
-			metrics.IncrCounterWithLabels([]string{"memberlist", "compress", "errors_total"}, 1,
+			metrics.IncrCounterWithLabels(metricCompressErrors, 1,
 				m.compressMetricLabels)
 			m.logger.Printf("[ERROR] memberlist: Failed to compress payload: %v", err)
 		} else {
@@ -920,7 +943,7 @@ func (m *Memberlist) rawSendMsgStream(conn net.Conn, sendBuf []byte, streamLabel
 				// back to plaintext to avoid paying encryption + network
 				// cost on a worse-than-original payload. Mirrors
 				// rawSendMsgPacket.
-				metrics.IncrCounterWithLabels([]string{"memberlist", "compress", "skipped_total"}, 1,
+				metrics.IncrCounterWithLabels(metricCompressSkipped, 1,
 					m.compressSkippedSizeWorseLabels)
 			}
 		}
@@ -1247,19 +1270,22 @@ func (m *Memberlist) readStream(conn net.Conn, streamLabel string) (messageType,
 			// Wrapper-decode failure happens before any algo tag is read
 			// from the wire; emit with algo="unknown" so the metric is
 			// symmetric with handleCompressed (UDP) which routes the same
-			// case via decompressPayload's unknownAlgo sentinel.
-			metrics.IncrCounterWithLabels([]string{"memberlist", "decompress", "errors_total"}, 1,
-				m.decompressLabels(unknownAlgo))
+			// case via decompressPayload's unknownAlgo sentinel. attempts
+			// counts everything we tried to decompress, including malformed
+			// frames, mirroring the compress side's denominator semantics.
+			unknownLabels := m.decompressLabels(unknownAlgo)
+			metrics.IncrCounterWithLabels(metricDecompressAttempts, 1, unknownLabels)
+			metrics.IncrCounterWithLabels(metricDecompressErrors, 1, unknownLabels)
 			return 0, nil, nil, err
 		}
+		metrics.IncrCounterWithLabels(metricDecompressAttempts, 1,
+			m.decompressLabels(c.Algo))
 		decomp, err := decompressBuffer(&c)
 		if err != nil {
-			metrics.IncrCounterWithLabels([]string{"memberlist", "decompress", "errors_total"}, 1,
+			metrics.IncrCounterWithLabels(metricDecompressErrors, 1,
 				m.decompressLabels(c.Algo))
 			return 0, nil, nil, err
 		}
-		metrics.IncrCounterWithLabels([]string{"memberlist", "decompress", "total"}, 1,
-			m.decompressLabels(c.Algo))
 
 		// Reset the message type
 		msgType = messageType(decomp[0])

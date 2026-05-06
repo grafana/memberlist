@@ -103,13 +103,13 @@ type Memberlist struct {
 	// payloads can hit this often enough to matter).
 	compressSkippedSizeWorseLabels []metrics.Label
 
-	// decompressMetricLabels[c.Algo] is metricLabels + an "algo" label
-	// set to the wire-tag's algorithm name. The receive path reads the
-	// algorithm from each incoming compressedPayload, so we precompute
-	// labels for every supported algo. unknownAlgo (255) is handled
-	// inline by the rare-path callers — see handleCompressed and
-	// readStream.
-	decompressMetricLabels [2][]metrics.Label // indexed by lzwAlgo / snappyAlgo
+	// decompressLZWLabels and decompressSnappyLabels are metricLabels +
+	// an "algo" label set to the corresponding algorithm name. The
+	// receive path reads the algorithm from each incoming
+	// compressedPayload and dispatches via decompressLabels. unknownAlgo
+	// (255) is handled inline by decompressLabels' default arm.
+	decompressLZWLabels    []metrics.Label
+	decompressSnappyLabels []metrics.Label
 }
 
 // BuildVsnArray creates the array of Vsn
@@ -254,10 +254,7 @@ func newMemberlist(conf *Config) (*Memberlist, error) {
 		metricLabels:         conf.MetricLabels,
 		compressionAlgo:      algo,
 	}
-	m.compressMetricLabels = withAlgoLabel(m.metricLabels, algoLabel(algo))
-	m.compressSkippedSizeWorseLabels = withReasonLabel(m.compressMetricLabels, "size_worse_than_original")
-	m.decompressMetricLabels[lzwAlgo] = withAlgoLabel(m.metricLabels, algoLabel(lzwAlgo))
-	m.decompressMetricLabels[snappyAlgo] = withAlgoLabel(m.metricLabels, algoLabel(snappyAlgo))
+	m.initMetricLabels()
 	m.broadcasts.NumNodes = func() int {
 		return m.estNumNodes()
 	}

@@ -23,7 +23,7 @@
   `memberlist_compress_attempts_total{algo}`,
   `memberlist_compress_skipped_total{algo,reason="size_worse_than_original"}`,
   `memberlist_compress_errors_total{algo}`,
-  `memberlist_decompress_total{algo}`,
+  `memberlist_decompress_attempts_total{algo}`,
   `memberlist_decompress_errors_total{algo}`.
 
 ### Changes

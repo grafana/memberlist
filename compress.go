@@ -45,6 +45,15 @@ func resolveCompressionAlgorithm(algo CompressionAlgorithm) (compressionType, er
 	}
 }
 
+// Hoisted metric-name slices, to avoid heap allocation on hot path.
+var (
+	metricCompressAttempts   = []string{"memberlist", "compress", "attempts_total"}
+	metricCompressSkipped    = []string{"memberlist", "compress", "skipped_total"}
+	metricCompressErrors     = []string{"memberlist", "compress", "errors_total"}
+	metricDecompressAttempts = []string{"memberlist", "decompress", "attempts_total"}
+	metricDecompressErrors   = []string{"memberlist", "decompress", "errors_total"}
+)
+
 // algoLabel converts algo to a stable string for use as a metric label.
 func algoLabel(algo compressionType) string {
 	switch algo {
@@ -57,40 +66,25 @@ func algoLabel(algo compressionType) string {
 	}
 }
 
-// withAlgoLabel returns base + a metrics label `{algo: <algoValue>}`. The
+// withLabel returns base + a metrics label `{<name>: <value>}`. The
 // returned slice has its capacity set to its length so subsequent appends
 // allocate a new array rather than mutating the precomputed slice. Used at
 // Memberlist construction time to precompute hot-path label slices.
-func withAlgoLabel(base []metrics.Label, algoValue string) []metrics.Label {
+func withLabel(base []metrics.Label, name, value string) []metrics.Label {
 	out := make([]metrics.Label, len(base), len(base)+1)
 	copy(out, base)
-	return append(out, metrics.Label{Name: "algo", Value: algoValue})
+	return append(out, metrics.Label{Name: name, Value: value})
 }
 
-// withReasonLabel returns base + a metrics label `{reason: <reasonValue>}`,
-// with the same cap-trim behaviour as withAlgoLabel.
-func withReasonLabel(base []metrics.Label, reasonValue string) []metrics.Label {
-	out := make([]metrics.Label, len(base), len(base)+1)
-	copy(out, base)
-	return append(out, metrics.Label{Name: "reason", Value: reasonValue})
-}
-
-// decompressLabels returns the precomputed metric label slice for algo on
-// the receive path. Each known algo gets a dedicated case so adding a new
-// compressionType without updating decompressMetricLabels (and this
-// switch) is a compile-time obligation rather than a silent miss.
-//
-// Unknown algos (including unknownAlgo from a wrapper-decode failure)
-// build a fresh slice — rare path.
-func (m *Memberlist) decompressLabels(algo compressionType) []metrics.Label {
-	switch algo {
-	case lzwAlgo:
-		return m.decompressMetricLabels[lzwAlgo]
-	case snappyAlgo:
-		return m.decompressMetricLabels[snappyAlgo]
-	default:
-		return withAlgoLabel(m.metricLabels, algoLabel(algo))
-	}
+// initMetricLabels populates the per-Memberlist precomputed metric label
+// slices used on the compress/decompress hot paths. Called once at
+// construction; the resulting slices are read concurrently from the send
+// and receive paths and never mutated thereafter.
+func (m *Memberlist) initMetricLabels() {
+	m.compressMetricLabels = withLabel(m.metricLabels, "algo", algoLabel(m.compressionAlgo))
+	m.compressSkippedSizeWorseLabels = withLabel(m.compressMetricLabels, "reason", "size_worse_than_original")
+	m.decompressLZWLabels = withLabel(m.metricLabels, "algo", algoLabel(lzwAlgo))
+	m.decompressSnappyLabels = withLabel(m.metricLabels, "algo", algoLabel(snappyAlgo))
 }
 
 // compressionType is used to specify the compression algorithm on the wire.
