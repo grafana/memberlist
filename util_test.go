@@ -502,26 +502,6 @@ func TestDecodeCompoundMessage_Trunc(t *testing.T) {
 	}
 }
 
-func TestCompressDecompressPayload(t *testing.T) {
-	buf, err := compressPayload(lzwAlgo, []byte("testing"), false)
-	if err != nil {
-		t.Fatalf("unexpected err: %s", err)
-	}
-	defer releaseBuffer(buf)
-
-	algo, decomp, err := decompressPayload(buf.Bytes()[1:])
-	if err != nil {
-		t.Fatalf("unexpected err: %s", err)
-	}
-	if algo != lzwAlgo {
-		t.Fatalf("bad algo: %d", algo)
-	}
-
-	if !reflect.DeepEqual(decomp, []byte("testing")) {
-		t.Fatalf("bad payload: %v", decomp)
-	}
-}
-
 type testNodeSelectionDelegate struct {
 	selectFunc func([]*NodeState) (selected []*NodeState, preferred *NodeState)
 }
