@@ -876,14 +876,15 @@ func (m *Memberlist) rawSendMsgPacket(a Address, node *Node, msg []byte) error {
 
 	// Check if we have encryption enabled
 	if m.config.EncryptionEnabled() && m.config.GossipVerifyOutgoing {
-		// Encrypt the payload
-		var (
-			primaryKey  = m.config.Keyring.GetPrimaryKey()
-			packetLabel = []byte(m.config.Label)
-			encryptBuf  bytes.Buffer
-		)
-		err := encryptPayload(m.encryptionVersion(), primaryKey, msg, packetLabel, &encryptBuf)
-		if err != nil {
+		// Encrypt the payload. Reuse the encode pool: same buffer kind,
+		// same sizing requirements (encrypted output sits within an
+		// MTU-sized packet for any UDP send). The deferred release fires
+		// after WriteToAddress below has consumed the bytes.
+		primaryKey := m.config.Keyring.GetPrimaryKey()
+		packetLabel := []byte(m.config.Label)
+		encryptBuf := getEncodeBuffer()
+		defer releaseEncodeBuffer(encryptBuf)
+		if err := encryptPayload(m.encryptionVersion(), primaryKey, msg, packetLabel, encryptBuf); err != nil {
 			m.logger.Printf("[ERR] memberlist: Encryption of message failed: %v", err)
 			return err
 		}
