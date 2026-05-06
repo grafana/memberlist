@@ -12,6 +12,7 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/hashicorp/go-msgpack/v2/codec"
@@ -37,19 +38,64 @@ func decode(buf []byte, out interface{}) error {
 	return dec.Decode(out)
 }
 
-// encode writes an encoded object to a new bytes buffer.
+// encodeBufPool recycles *bytes.Buffer values produced by encode(). The
+// buffer's backing slice is grown by msgpack during encoding; pooling lets
+// subsequent calls reuse the grown slice instead of reallocating.
 //
-// The returned buffer is NOT pooled because the encoded bytes can outlive
-// the immediate call. The input `in` is not retained by the returned buffer.
+// Pool callers MUST releaseEncodeBuffer once they are done with the
+// returned buffer's bytes — typically via defer right after the encode()
+// call returns successfully and the bytes have been consumed (sent on the
+// wire, copied out, etc.).
+var encodeBufPool = sync.Pool{
+	New: func() any {
+		return new(bytes.Buffer)
+	},
+}
+
+// maxPooledEncodeBufCap bounds the capacity of buffers retained by
+// encodeBufPool. The cap targets the high-rate UDP/gossip path, where
+// encoded messages are at most a few KiB. TCP push-pull encodes can
+// exceed 1 MiB and are intentionally not pooled — they're rare and we'd
+// otherwise pin ~tens of MiB of idle pool footprint per goroutine that
+// happens to encode a large push-pull payload.
+const maxPooledEncodeBufCap = 1 << 20
+
+func getEncodeBuffer() *bytes.Buffer {
+	b := encodeBufPool.Get().(*bytes.Buffer)
+	b.Reset()
+	return b
+}
+
+func releaseEncodeBuffer(b *bytes.Buffer) {
+	if b.Cap() > maxPooledEncodeBufCap {
+		return
+	}
+	b.Reset()
+	encodeBufPool.Put(b)
+}
+
+// encode writes an encoded object to a buffer drawn from encodeBufPool.
+// On success the caller MUST releaseEncodeBuffer the returned buffer
+// once its bytes are no longer needed; typical usage is
+// `defer releaseEncodeBuffer(buf)` immediately after the err check.
+//
+// On error the returned buffer is nil; any pool buffer acquired
+// internally has already been released, so the caller does not need to
+// release on the error path.
+//
+// The input `in` is not retained by the returned buffer.
 func encode(msgType messageType, in interface{}, msgpackUseNewTimeFormat bool) (*bytes.Buffer, error) {
-	buf := bytes.NewBuffer(nil)
+	buf := getEncodeBuffer()
 	buf.WriteByte(uint8(msgType))
 	hd := codec.MsgpackHandle{}
 	hd.TimeNotBuiltin = !msgpackUseNewTimeFormat
 
 	enc := codec.NewEncoder(buf, &hd)
-	err := enc.Encode(in)
-	return buf, err
+	if err := enc.Encode(in); err != nil {
+		releaseEncodeBuffer(buf)
+		return nil, err
+	}
+	return buf, nil
 }
 
 // Returns a random offset between 0 and n

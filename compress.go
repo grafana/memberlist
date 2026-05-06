@@ -10,6 +10,8 @@ import (
 	"io"
 	"sync"
 
+	metrics "github.com/hashicorp/go-metrics/compat"
+
 	"github.com/golang/snappy"
 )
 
@@ -52,6 +54,42 @@ func algoLabel(algo compressionType) string {
 		return "snappy"
 	default:
 		return "unknown"
+	}
+}
+
+// withAlgoLabel returns base + a metrics label `{algo: <algoValue>}`. The
+// returned slice has its capacity set to its length so subsequent appends
+// allocate a new array rather than mutating the precomputed slice. Used at
+// Memberlist construction time to precompute hot-path label slices.
+func withAlgoLabel(base []metrics.Label, algoValue string) []metrics.Label {
+	out := make([]metrics.Label, len(base), len(base)+1)
+	copy(out, base)
+	return append(out, metrics.Label{Name: "algo", Value: algoValue})
+}
+
+// withReasonLabel returns base + a metrics label `{reason: <reasonValue>}`,
+// with the same cap-trim behaviour as withAlgoLabel.
+func withReasonLabel(base []metrics.Label, reasonValue string) []metrics.Label {
+	out := make([]metrics.Label, len(base), len(base)+1)
+	copy(out, base)
+	return append(out, metrics.Label{Name: "reason", Value: reasonValue})
+}
+
+// decompressLabels returns the precomputed metric label slice for algo on
+// the receive path. Each known algo gets a dedicated case so adding a new
+// compressionType without updating decompressMetricLabels (and this
+// switch) is a compile-time obligation rather than a silent miss.
+//
+// Unknown algos (including unknownAlgo from a wrapper-decode failure)
+// build a fresh slice — rare path.
+func (m *Memberlist) decompressLabels(algo compressionType) []metrics.Label {
+	switch algo {
+	case lzwAlgo:
+		return m.decompressMetricLabels[lzwAlgo]
+	case snappyAlgo:
+		return m.decompressMetricLabels[snappyAlgo]
+	default:
+		return withAlgoLabel(m.metricLabels, algoLabel(algo))
 	}
 }
 
@@ -118,13 +156,13 @@ var bytesBufferPool = sync.Pool{
 	},
 }
 
-func getBuffer() *bytes.Buffer {
+func getLZWScratch() *bytes.Buffer {
 	buf := bytesBufferPool.Get().(*bytes.Buffer)
 	buf.Reset()
 	return buf
 }
 
-func releaseBuffer(b *bytes.Buffer) {
+func releaseLZWScratch(b *bytes.Buffer) {
 	if b.Cap() > maxPooledLZWScratchCap {
 		return
 	}
@@ -192,8 +230,10 @@ func putSnappyEncodeBuf(p *[]byte) {
 // requested algo, and wraps the result in a compressedPayload that is
 // encoded as a compressMsg frame.
 //
-// The returned *bytes.Buffer is freshly allocated and may be retained by
-// the caller.
+// On success the returned *bytes.Buffer is drawn from encodeBufPool; the
+// caller MUST releaseEncodeBuffer it once the bytes have been consumed.
+// On error a nil buffer is returned and the caller does not need to
+// release.
 func compressPayload(algo compressionType, inp []byte, msgpackUseNewTimeFormat bool) (*bytes.Buffer, error) {
 	var encoded []byte
 	switch algo {
@@ -202,7 +242,7 @@ func compressPayload(algo compressionType, inp []byte, msgpackUseNewTimeFormat b
 		if err != nil {
 			return nil, err
 		}
-		defer releaseBuffer(buf)
+		defer releaseLZWScratch(buf)
 		encoded = buf.Bytes()
 	case snappyAlgo:
 		bufPtr := snappyCompress(inp)
@@ -246,10 +286,11 @@ func decompressBuffer(c *compressedPayload) ([]byte, error) {
 }
 
 // lzwCompress compresses src using lzw and returns the pooled scratch
-// buffer holding the encoded bytes. The caller MUST releaseBuffer the
-// returned buffer once the bytes are no longer needed.
+// buffer holding the encoded bytes. The caller MUST releaseLZWScratch the
+// returned buffer once the bytes are no longer needed (typically via defer
+// right after a non-error return).
 func lzwCompress(src []byte) (*bytes.Buffer, error) {
-	buf := getBuffer()
+	buf := getLZWScratch()
 	w := lzwWriterPool.Get().(*lzw.Writer)
 	// The writer is reusable after the next Reset, so we return it to the
 	// pool unconditionally.
@@ -257,12 +298,12 @@ func lzwCompress(src []byte) (*bytes.Buffer, error) {
 	w.Reset(buf, lzw.LSB, lzwLitWidth)
 
 	if _, err := w.Write(src); err != nil {
-		releaseBuffer(buf)
+		releaseLZWScratch(buf)
 		return nil, err
 	}
 	// Ensure we flush everything out.
 	if err := w.Close(); err != nil {
-		releaseBuffer(buf)
+		releaseLZWScratch(buf)
 		return nil, err
 	}
 

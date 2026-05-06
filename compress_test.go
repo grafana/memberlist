@@ -12,6 +12,7 @@ import (
 	"sync"
 	"testing"
 
+	metrics "github.com/hashicorp/go-metrics/compat"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -167,25 +168,88 @@ func TestCompressDecompress(t *testing.T) {
 	})
 }
 
-// TestReleaseBuffer_BoundedCap verifies the pool drops oversized buffers
-// rather than retaining them forever.
-func TestReleaseBuffer_BoundedCap(t *testing.T) {
-	big := getBuffer()
+// TestReleaseLZWScratch_BoundedCap verifies the LZW scratch pool drops
+// oversized buffers rather than retaining them forever.
+func TestReleaseLZWScratch_BoundedCap(t *testing.T) {
+	big := getLZWScratch()
 	big.Write(make([]byte, maxPooledLZWScratchCap+1))
 	require.Greater(t, big.Cap(), maxPooledLZWScratchCap)
 
-	releaseBuffer(big)
+	releaseLZWScratch(big)
 	// We can't directly assert the pool's contents (sync.Pool's interface
 	// permits the runtime to drop entries on its own), but we can assert
-	// that getBuffer() never returns a buffer with cap > limit unless one
+	// that getLZWScratch() never returns a buffer with cap > limit unless one
 	// was explicitly retained — release of an oversized buffer must not
 	// re-surface here.
 	for i := range 10 {
-		b := getBuffer()
+		b := getLZWScratch()
 		require.LessOrEqual(t, b.Cap(), maxPooledLZWScratchCap,
 			"oversized buffer leaked through pool on iteration %d", i)
-		releaseBuffer(b)
+		releaseLZWScratch(b)
 	}
+}
+
+// TestReleaseEncodeBuffer_BoundedCap is the encode-pool counterpart of
+// TestReleaseLZWScratch_BoundedCap.
+func TestReleaseEncodeBuffer_BoundedCap(t *testing.T) {
+	big := getEncodeBuffer()
+	big.Write(make([]byte, maxPooledEncodeBufCap+1))
+	require.Greater(t, big.Cap(), maxPooledEncodeBufCap)
+
+	releaseEncodeBuffer(big)
+	for i := range 10 {
+		b := getEncodeBuffer()
+		require.LessOrEqual(t, b.Cap(), maxPooledEncodeBufCap,
+			"oversized buffer leaked through encode pool on iteration %d", i)
+		releaseEncodeBuffer(b)
+	}
+}
+
+// TestEncodeBuffer_Reused asserts the encode pool actually pools — i.e.,
+// steady-state Get/Release cycles don't allocate. A regression that drops
+// the pool path entirely (e.g., always returning new(bytes.Buffer)) would
+// cause one alloc per iteration and fail this test.
+//
+// sync.Pool may drop entries on GC, so we measure averaged allocations
+// across many iterations and tolerate a small upper bound.
+func TestEncodeBuffer_Reused(t *testing.T) {
+	allocs := testing.AllocsPerRun(1000, func() {
+		b := getEncodeBuffer()
+		b.WriteString("hello")
+		releaseEncodeBuffer(b)
+	})
+	require.Less(t, allocs, 0.5, "expected encode pool to amortize allocations to ~0/op")
+}
+
+// TestPrecomputedMetricLabels guards the cap-trim invariant on the
+// hot-path label slices: appending to compressMetricLabels must NOT
+// mutate metricLabels (or the precomputed slice's backing array would
+// alias and the next append would race with concurrent reads). Also
+// verifies the algo / reason labels are present and correctly ordered.
+func TestPrecomputedMetricLabels(t *testing.T) {
+	base := []metrics.Label{{Name: "cluster", Value: "test"}}
+
+	// withAlgoLabel: result preserves base, appends {algo: lzw}, and
+	// has cap == len so subsequent appends don't mutate it.
+	got := withAlgoLabel(base, "lzw")
+	require.Equal(t, []metrics.Label{
+		{Name: "cluster", Value: "test"},
+		{Name: "algo", Value: "lzw"},
+	}, got)
+	require.Equal(t, len(got), cap(got), "withAlgoLabel must cap-trim")
+
+	// Mutating base must not bleed into got.
+	base[0] = metrics.Label{Name: "cluster", Value: "other"}
+	require.Equal(t, "test", got[0].Value)
+
+	// withReasonLabel layers on top — used for compressSkippedSizeWorseLabels.
+	skipped := withReasonLabel(got, "size_worse_than_original")
+	require.Equal(t, []metrics.Label{
+		{Name: "cluster", Value: "test"},
+		{Name: "algo", Value: "lzw"},
+		{Name: "reason", Value: "size_worse_than_original"},
+	}, skipped)
+	require.Equal(t, len(skipped), cap(skipped), "withReasonLabel must cap-trim")
 }
 
 // TestDecompressErrors covers all decompress-side error paths: per-algorithm
@@ -206,7 +270,7 @@ func TestDecompressErrors(t *testing.T) {
 			buf, err := lzwCompress(plain)
 			require.NoError(t, err)
 			compressed := append([]byte(nil), buf.Bytes()...)
-			releaseBuffer(buf)
+			releaseLZWScratch(buf)
 
 			_, err = lzwDecompress(compressed)
 			require.EqualError(t, err, fmt.Sprintf("memberlist: LZW-decompressed payload exceeds %d bytes", maxDecompressBytes))
@@ -372,7 +436,10 @@ func assertBenchSizes(b *testing.B, sizes []int) {
 // BenchmarkCompressPayload measures the compress hot path for both
 // algorithms across realistic payload sizes (small UDP, typical UDP, MTU,
 // mid-sized push-pull) on two corpora (compressible vs incompressible).
-// Use with -benchmem to surface per-call alloc count.
+// The returned encode buffer is released back to the pool every iteration
+// so the bench reflects steady-state pool-warm cost (which is the
+// production case), not first-call allocation cost. Use with -benchmem to
+// surface per-call alloc count.
 func BenchmarkCompressPayload(b *testing.B) {
 	sizes := []int{64, 256, 1500, 16 * 1024}
 	assertBenchSizes(b, sizes)
@@ -386,10 +453,31 @@ func BenchmarkCompressPayload(b *testing.B) {
 					for b.Loop() {
 						buf, err := compressPayload(algo, src, false)
 						require.NoError(b, err)
-						_ = buf
+						releaseEncodeBuffer(buf)
 					}
 				})
 			}
+		}
+	}
+}
+
+// BenchmarkEncode isolates the encode() path (msgpack only, no
+// compression) so the encode-buffer pool's effect is directly observable.
+func BenchmarkEncode(b *testing.B) {
+	sizes := []int{64, 256, 1500, 16 * 1024}
+	assertBenchSizes(b, sizes)
+	for _, c := range benchCorpora() {
+		for _, size := range sizes {
+			b.Run(fmt.Sprintf("%s/%d", c.name, size), func(b *testing.B) {
+				payload := &compressedPayload{Algo: lzwAlgo, Buf: c.payload[:size]}
+				b.ResetTimer()
+				b.ReportAllocs()
+				for b.Loop() {
+					buf, err := encode(compressMsg, payload, false)
+					require.NoError(b, err)
+					releaseEncodeBuffer(buf)
+				}
+			})
 		}
 	}
 }

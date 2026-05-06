@@ -355,19 +355,22 @@ func (m *Memberlist) probeNode(node *NodeState) {
 		}
 	} else {
 		var msgs [][]byte
-		if buf, err := encode(pingMsg, &ping, m.config.MsgpackUseNewTimeFormat); err != nil {
+		pingBuf, err := encode(pingMsg, &ping, m.config.MsgpackUseNewTimeFormat)
+		if err != nil {
 			m.logger.Printf("[ERR] memberlist: Failed to encode UDP ping message: %s", err)
 			return
-		} else {
-			msgs = append(msgs, buf.Bytes())
 		}
+		defer releaseEncodeBuffer(pingBuf)
+		msgs = append(msgs, pingBuf.Bytes())
+
 		s := suspect{Incarnation: node.Incarnation, Node: node.Name, From: m.config.Name}
-		if buf, err := encode(suspectMsg, &s, m.config.MsgpackUseNewTimeFormat); err != nil {
+		suspectBuf, err := encode(suspectMsg, &s, m.config.MsgpackUseNewTimeFormat)
+		if err != nil {
 			m.logger.Printf("[ERR] memberlist: Failed to encode suspect message: %s", err)
 			return
-		} else {
-			msgs = append(msgs, buf.Bytes())
 		}
+		defer releaseEncodeBuffer(suspectBuf)
+		msgs = append(msgs, suspectBuf.Bytes())
 
 		compound := makeCompoundMessage(msgs)
 		if err := m.rawSendMsgPacket(node.FullAddress(), &node.Node, compound.Bytes()); err != nil {

@@ -268,6 +268,7 @@ func (m *Memberlist) handleConn(conn net.Conn) {
 				m.logger.Printf("[ERR] memberlist: Failed to encode error response: %s", err)
 				return
 			}
+			defer releaseEncodeBuffer(out)
 
 			err = m.rawSendMsgStream(conn, out.Bytes(), streamLabel)
 			if err != nil {
@@ -327,6 +328,7 @@ func (m *Memberlist) handleConn(conn net.Conn) {
 			m.logger.Printf("[ERR] memberlist: Failed to encode ack: %s", err)
 			return
 		}
+		defer releaseEncodeBuffer(out)
 
 		err = m.rawSendMsgStream(conn, out.Bytes(), streamLabel)
 		if err != nil {
@@ -756,12 +758,12 @@ func (m *Memberlist) handleCompressed(buf []byte, from net.Addr, timestamp time.
 	algo, payload, err := decompressPayload(buf)
 	if err != nil {
 		metrics.IncrCounterWithLabels([]string{"memberlist", "decompress", "errors_total"}, 1,
-			append(m.metricLabels, metrics.Label{Name: "algo", Value: algoLabel(algo)}))
+			m.decompressLabels(algo))
 		m.logger.Printf("[ERR] memberlist: Failed to decompress payload: %v %s", err, LogAddress(from))
 		return
 	}
 	metrics.IncrCounterWithLabels([]string{"memberlist", "decompress", "total"}, 1,
-		append(m.metricLabels, metrics.Label{Name: "algo", Value: algoLabel(algo)}))
+		m.decompressLabels(algo))
 
 	// Recursively handle the payload
 	m.handleCommand(payload, from, timestamp)
@@ -773,6 +775,7 @@ func (m *Memberlist) encodeAndSendMsg(a Address, msgType messageType, msg interf
 	if err != nil {
 		return err
 	}
+	defer releaseEncodeBuffer(out)
 	if err := m.sendMsg(a, out.Bytes()); err != nil {
 		return err
 	}
@@ -821,26 +824,27 @@ func (m *Memberlist) rawSendMsgPacket(a Address, node *Node, msg []byte) error {
 
 	// Check if we have compression enabled
 	if m.config.EnableCompression {
-		algoLbl := metrics.Label{Name: "algo", Value: algoLabel(m.compressionAlgo)}
 		metrics.IncrCounterWithLabels([]string{"memberlist", "compress", "attempts_total"}, 1,
-			append(m.metricLabels, algoLbl))
+			m.compressMetricLabels)
 		buf, err := compressPayload(m.compressionAlgo, msg, m.config.MsgpackUseNewTimeFormat)
 		if err != nil {
 			// Compression failed — fall back to plaintext to avoid paying
 			// encryption + network cost on a payload we couldn't shrink.
 			metrics.IncrCounterWithLabels([]string{"memberlist", "compress", "errors_total"}, 1,
-				append(m.metricLabels, algoLbl))
+				m.compressMetricLabels)
 			m.logger.Printf("[WARN] memberlist: Failed to compress payload: %v", err)
-		} else if buf.Len() < len(msg) {
-			// Compression reduced the size; emit the compressed bytes.
-			msg = buf.Bytes()
 		} else {
-			// Compressed payload was no smaller than the input — fall back
-			// to plaintext to avoid paying encryption + network cost on a
-			// worse-than-original payload.
-			metrics.IncrCounterWithLabels([]string{"memberlist", "compress", "skipped_total"}, 1,
-				append(m.metricLabels, algoLbl,
-					metrics.Label{Name: "reason", Value: "size_worse_than_original"}))
+			defer releaseEncodeBuffer(buf)
+			if buf.Len() < len(msg) {
+				// Compression reduced the size; emit the compressed bytes.
+				msg = buf.Bytes()
+			} else {
+				// Compressed payload was no smaller than the input — fall
+				// back to plaintext to avoid paying encryption + network
+				// cost on a worse-than-original payload.
+				metrics.IncrCounterWithLabels([]string{"memberlist", "compress", "skipped_total"}, 1,
+					m.compressSkippedSizeWorseLabels)
+			}
 		}
 	}
 
@@ -876,14 +880,14 @@ func (m *Memberlist) rawSendMsgPacket(a Address, node *Node, msg []byte) error {
 		var (
 			primaryKey  = m.config.Keyring.GetPrimaryKey()
 			packetLabel = []byte(m.config.Label)
-			buf         bytes.Buffer
+			encryptBuf  bytes.Buffer
 		)
-		err := encryptPayload(m.encryptionVersion(), primaryKey, msg, packetLabel, &buf)
+		err := encryptPayload(m.encryptionVersion(), primaryKey, msg, packetLabel, &encryptBuf)
 		if err != nil {
 			m.logger.Printf("[ERR] memberlist: Encryption of message failed: %v", err)
 			return err
 		}
-		msg = buf.Bytes()
+		msg = encryptBuf.Bytes()
 	}
 
 	metrics.IncrCounterWithLabels([]string{"memberlist", "udp", "sent"}, float32(len(msg)), m.metricLabels)
@@ -896,25 +900,27 @@ func (m *Memberlist) rawSendMsgPacket(a Address, node *Node, msg []byte) error {
 func (m *Memberlist) rawSendMsgStream(conn net.Conn, sendBuf []byte, streamLabel string) error {
 	// Check if compression is enabled
 	if m.config.EnableCompression {
-		algoLbl := metrics.Label{Name: "algo", Value: algoLabel(m.compressionAlgo)}
 		metrics.IncrCounterWithLabels([]string{"memberlist", "compress", "attempts_total"}, 1,
-			append(m.metricLabels, algoLbl))
+			m.compressMetricLabels)
 		compBuf, err := compressPayload(m.compressionAlgo, sendBuf, m.config.MsgpackUseNewTimeFormat)
 		if err != nil {
 			// Compression failed — fall back to plaintext.
 			metrics.IncrCounterWithLabels([]string{"memberlist", "compress", "errors_total"}, 1,
-				append(m.metricLabels, algoLbl))
+				m.compressMetricLabels)
 			m.logger.Printf("[ERROR] memberlist: Failed to compress payload: %v", err)
-		} else if compBuf.Len() < len(sendBuf) {
-			// Compression reduced the size; emit the compressed bytes.
-			sendBuf = compBuf.Bytes()
 		} else {
-			// Compressed payload was no smaller than the input — fall back
-			// to plaintext to avoid paying encryption + network cost on a
-			// worse-than-original payload. Mirrors rawSendMsgPacket.
-			metrics.IncrCounterWithLabels([]string{"memberlist", "compress", "skipped_total"}, 1,
-				append(m.metricLabels, algoLbl,
-					metrics.Label{Name: "reason", Value: "size_worse_than_original"}))
+			defer releaseEncodeBuffer(compBuf)
+			if compBuf.Len() < len(sendBuf) {
+				// Compression reduced the size; emit the compressed bytes.
+				sendBuf = compBuf.Bytes()
+			} else {
+				// Compressed payload was no smaller than the input — fall
+				// back to plaintext to avoid paying encryption + network
+				// cost on a worse-than-original payload. Mirrors
+				// rawSendMsgPacket.
+				metrics.IncrCounterWithLabels([]string{"memberlist", "compress", "skipped_total"}, 1,
+					m.compressSkippedSizeWorseLabels)
+			}
 		}
 	}
 
@@ -1235,11 +1241,11 @@ func (m *Memberlist) readStream(conn net.Conn, streamLabel string) (messageType,
 		decomp, err := decompressBuffer(&c)
 		if err != nil {
 			metrics.IncrCounterWithLabels([]string{"memberlist", "decompress", "errors_total"}, 1,
-				append(m.metricLabels, metrics.Label{Name: "algo", Value: algoLabel(c.Algo)}))
+				m.decompressLabels(c.Algo))
 			return 0, nil, nil, err
 		}
 		metrics.IncrCounterWithLabels([]string{"memberlist", "decompress", "total"}, 1,
-			append(m.metricLabels, metrics.Label{Name: "algo", Value: algoLabel(c.Algo)}))
+			m.decompressLabels(c.Algo))
 
 		// Reset the message type
 		msgType = messageType(decomp[0])
@@ -1394,6 +1400,7 @@ func (m *Memberlist) sendPingAndWaitForAck(a Address, ping ping, deadline time.T
 	if err != nil {
 		return false, err
 	}
+	defer releaseEncodeBuffer(out)
 
 	if err = m.rawSendMsgStream(conn, out.Bytes(), m.config.Label); err != nil {
 		return false, err

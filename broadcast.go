@@ -63,12 +63,14 @@ func (m *Memberlist) encodeBroadcastNotify(node string, msgType messageType, msg
 		m.logger.Printf("[ERR] memberlist: Failed to encode message for broadcast: %s", err)
 		return
 	}
-	// Copy the encoded bytes out of the encode buffer before queueing: the
-	// broadcast queue may hand the slice to gossip senders concurrently with
-	// calling Finished on a broadcast that's hit its retransmit limit
+
+	defer releaseEncodeBuffer(buf)
+	// Copy the encoded bytes out of the pooled encode buffer before queueing:
+	// the broadcast queue may hand the slice to gossip senders concurrently
+	// with calling Finished on a broadcast that's hit its retransmit limit
 	// (queue.go:GetBroadcasts), and Finished happens before the caller has
 	// finished its send. Copying severs the lifetime of the slice from the
-	// underlying buffer.
+	// pooled buffer.
 	stable := make([]byte, buf.Len())
 	copy(stable, buf.Bytes())
 	m.queueBroadcast(node, stable, notify)
