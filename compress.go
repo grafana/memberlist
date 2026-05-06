@@ -60,14 +60,25 @@ func algoLabel(algo compressionType) string {
 type compressionType uint8
 
 const (
-	lzwAlgo compressionType = iota
-	snappyAlgo
+	lzwAlgo    compressionType = iota // 0
+	snappyAlgo                        // 1
+
+	// unknownAlgo is the sentinel returned by decompressPayload when the
+	// outer compressedPayload wrapper itself fails to decode — i.e., the
+	// failure happened before any algorithm tag was read from the wire.
+	// Callers emit it via algoLabel so the resulting error metric carries
+	// algo="unknown" rather than misattributing a frame-level failure to
+	// LZW (the zero value).
+	//
+	// A uint8 max value (255) avoids any future collision with newly-
+	// assigned real algorithm IDs that grow upward from snappyAlgo=1.
+	unknownAlgo compressionType = 255
 )
 
-// compress is used to wrap an underlying payload using a specified
-// compression algorithm. It is the on-wire structure carried inside a
-// compressMsg frame.
-type compress struct {
+// compressedPayload wraps an underlying payload along with the algorithm
+// used to compress it. It is the on-wire struct carried inside a compressMsg
+// frame.
+type compressedPayload struct {
 	Algo compressionType
 	Buf  []byte
 }
@@ -170,11 +181,11 @@ func putSnappyEncodeBuf(p *[]byte) {
 }
 
 // compressPayload takes an opaque input buffer, compresses it using the
-// requested algo, and wraps the result in a compress{} message that
-// is encoded as a compressMsg frame.
+// requested algo, and wraps the result in a compressedPayload that is
+// encoded as a compressMsg frame.
 //
-// The returned *bytes.Buffer is owned by the caller. It comes from encode()
-// (which doesn't pool) and is released by the GC.
+// The returned *bytes.Buffer is freshly allocated and may be retained by
+// the caller.
 func compressPayload(algo compressionType, inp []byte, msgpackUseNewTimeFormat bool) (*bytes.Buffer, error) {
 	var encoded []byte
 	switch algo {
@@ -186,38 +197,25 @@ func compressPayload(algo compressionType, inp []byte, msgpackUseNewTimeFormat b
 		defer releaseBuffer(buf)
 		encoded = buf.Bytes()
 	case snappyAlgo:
-		bufPtr, err := snappyCompress(inp)
-		if err != nil {
-			return nil, err
-		}
+		bufPtr := snappyCompress(inp)
 		defer putSnappyEncodeBuf(bufPtr)
 		encoded = *bufPtr
 	default:
 		return nil, fmt.Errorf("memberlist: cannot compress with unknown algorithm %d", algo)
 	}
 
-	return encode(compressMsg, &compress{Algo: algo, Buf: encoded}, msgpackUseNewTimeFormat)
+	return encode(compressMsg, &compressedPayload{Algo: algo, Buf: encoded}, msgpackUseNewTimeFormat)
 }
 
-// unknownAlgo is the sentinel returned by decompressPayload when the outer
-// compress{} wrapper itself fails to decode — i.e., the failure happened
-// before any algorithm tag was read from the wire. Callers emit it via
-// algoLabel so the resulting error metric carries algo="unknown" rather
-// than misattributing a frame-level failure to LZW (the zero value).
-//
-// A uint8 max value (255) avoids any future collision with newly-assigned
-// real algorithm IDs that grow upward from snappyAlgo=1.
-const unknownAlgo compressionType = 255
-
-// decompressPayload unpacks an encoded compress{} message and returns the
+// decompressPayload unpacks an encoded compressedPayload and returns the
 // algorithm used along with its uncompressed payload. The returned slice is
 // freshly allocated and may be retained by the caller.
 //
-// On wrapper-decode failure (the compress{} frame itself is malformed) the
+// On wrapper-decode failure (the compressedPayload itself is malformed) the
 // returned algo is unknownAlgo so the caller's error metric is not falsely
 // labeled as the lzwAlgo zero value.
 func decompressPayload(msg []byte) (compressionType, []byte, error) {
-	var c compress
+	var c compressedPayload
 	if err := decode(msg, &c); err != nil {
 		return unknownAlgo, nil, err
 	}
@@ -225,10 +223,10 @@ func decompressPayload(msg []byte) (compressionType, []byte, error) {
 	return c.Algo, payload, err
 }
 
-// decompressBuffer decompresses the buffer of a single compress message,
+// decompressBuffer decompresses the buffer of a single compressedPayload,
 // dispatching on the algorithm tag. The returned slice is freshly allocated
 // and may be retained by the caller.
-func decompressBuffer(c *compress) ([]byte, error) {
+func decompressBuffer(c *compressedPayload) ([]byte, error) {
 	switch c.Algo {
 	case lzwAlgo:
 		return lzwDecompress(c.Buf)
@@ -239,9 +237,9 @@ func decompressBuffer(c *compress) ([]byte, error) {
 	}
 }
 
-// lzwCompress compresses src using lzw and returns the pooled
-// scratch buffer holding the encoded bytes. The caller MUST releaseBuffer
-// the returned buffer once the bytes are no longer needed.
+// lzwCompress compresses src using lzw and returns the pooled scratch
+// buffer holding the encoded bytes. The caller MUST releaseBuffer the
+// returned buffer once the bytes are no longer needed.
 func lzwCompress(src []byte) (*bytes.Buffer, error) {
 	buf := getBuffer()
 	w := lzwWriterPool.Get().(*lzw.Writer)
@@ -251,10 +249,10 @@ func lzwCompress(src []byte) (*bytes.Buffer, error) {
 	w.Reset(buf, lzw.LSB, lzwLitWidth)
 
 	if _, err := w.Write(src); err != nil {
-		_ = w.Close()
 		releaseBuffer(buf)
 		return nil, err
 	}
+	// Ensure we flush everything out.
 	if err := w.Close(); err != nil {
 		releaseBuffer(buf)
 		return nil, err
@@ -314,13 +312,13 @@ func lzwDecompress(src []byte) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-// snappyCompress compresses src using snappy and returns a
-// pointer to the pooled destination slice. The caller MUST putSnappyEncodeBuf
-// the returned pointer once the bytes are no longer needed.
-func snappyCompress(src []byte) (*[]byte, error) {
+// snappyCompress compresses src using snappy and returns a pointer to the
+// pooled destination slice. The caller MUST putSnappyEncodeBuf the returned
+// pointer once the bytes are no longer needed.
+func snappyCompress(src []byte) *[]byte {
 	bufPtr := snappyEncodeBufPool.Get().(*[]byte)
 	*bufPtr = snappy.Encode((*bufPtr)[:0], src)
-	return bufPtr, nil
+	return bufPtr
 }
 
 // snappyDecompress returns a freshly allocated []byte holding the

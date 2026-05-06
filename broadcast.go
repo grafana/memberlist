@@ -57,20 +57,18 @@ func (m *Memberlist) encodeAndBroadcast(node string, msgType messageType, msg in
 // encodeBroadcastNotify encodes a message and enqueues it for broadcast
 // and notifies the given channel when transmission is finished. Fails
 // silently if there is an encoding error.
-//
-// The encoded bytes are copied out of the pooled encode buffer before
-// queueing because the broadcast queue may hand the slice to gossip
-// senders concurrently with calling Finished on a broadcast that's hit
-// its retransmit limit (queue.go:GetBroadcasts), and Finished happens
-// before the caller has finished its send. Copying severs the lifetime
-// of the slice from the pooled buffer.
 func (m *Memberlist) encodeBroadcastNotify(node string, msgType messageType, msg interface{}, notify chan struct{}) {
 	buf, err := encode(msgType, msg, m.config.MsgpackUseNewTimeFormat)
 	if err != nil {
 		m.logger.Printf("[ERR] memberlist: Failed to encode message for broadcast: %s", err)
 		return
 	}
-	defer releaseBuffer(buf)
+	// Copy the encoded bytes out of the encode buffer before queueing: the
+	// broadcast queue may hand the slice to gossip senders concurrently with
+	// calling Finished on a broadcast that's hit its retransmit limit
+	// (queue.go:GetBroadcasts), and Finished happens before the caller has
+	// finished its send. Copying severs the lifetime of the slice from the
+	// underlying buffer.
 	stable := make([]byte, buf.Len())
 	copy(stable, buf.Bytes())
 	m.queueBroadcast(node, stable, notify)

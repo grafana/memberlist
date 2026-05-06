@@ -1222,7 +1222,7 @@ func (m *Memberlist) readStream(conn net.Conn, streamLabel string) (messageType,
 
 	// Check if we have a compressed message
 	if msgType == compressMsg {
-		var c compress
+		var c compressedPayload
 		if err := dec.Decode(&c); err != nil {
 			// Wrapper-decode failure happens before any algo tag is read
 			// from the wire; emit with algo="unknown" so the metric is

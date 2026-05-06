@@ -227,8 +227,8 @@ func TestDecompressErrors(t *testing.T) {
 		})
 	})
 
-	// Lock down the contract that makes the compress.error metric
-	// labelable: when the outer compress{} wrapper itself can't be
+	// Lock down the contract that makes the decompress error metric
+	// labelable: when the outer compressedPayload itself can't be
 	// msgpack-decoded, decompressPayload returns unknownAlgo (255) so
 	// the caller's algoLabel maps to "unknown" rather than the lzwAlgo
 	// zero value.
@@ -240,7 +240,7 @@ func TestDecompressErrors(t *testing.T) {
 	})
 
 	t.Run("UnknownAlgorithm", func(t *testing.T) {
-		c := &compress{Algo: 99, Buf: nil}
+		c := &compressedPayload{Algo: 99, Buf: nil}
 		_, err := decompressBuffer(c)
 		require.EqualError(t, err, "cannot decompress unknown algorithm 99")
 	})
@@ -407,7 +407,7 @@ func BenchmarkDecompressBuffer(b *testing.B) {
 					src := c.payload[:size]
 					wrapped, err := compressPayload(algo, src, false)
 					require.NoError(b, err)
-					var compressed compress
+					var compressed compressedPayload
 					require.NoError(b, decode(wrapped.Bytes()[1:], &compressed))
 					b.ResetTimer()
 					b.ReportAllocs()

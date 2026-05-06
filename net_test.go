@@ -586,7 +586,7 @@ func TestTCPPushPull(t *testing.T) {
 
 	// Check if we have a compressed message
 	if msgType == compressMsg {
-		var c compress
+		var c compressedPayload
 		if err := dec.Decode(&c); err != nil {
 			t.Fatalf("unexpected err %s", err)
 		}

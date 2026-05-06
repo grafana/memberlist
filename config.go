@@ -191,10 +191,6 @@ type Config struct {
 	// backward compatibility. Receivers always decode every algorithm they
 	// understand independently of this setting; senders only emit one.
 	// Empty string is treated as LZW.
-	//
-	// The value is read once at Create / newMemberlist time and cached on
-	// the resulting *Memberlist. Mutating this field after construction
-	// has no effect on outgoing messages.
 	CompressionAlgorithm CompressionAlgorithm
 
 	// SecretKey is used to initialize the primary encryption key in a keyring.

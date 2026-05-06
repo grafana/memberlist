@@ -40,7 +40,7 @@ func decode(buf []byte, out interface{}) error {
 // encode writes an encoded object to a new bytes buffer.
 //
 // The returned buffer is NOT pooled because the encoded bytes can outlive
-// the immediate call.
+// the immediate call. The input `in` is not retained by the returned buffer.
 func encode(msgType messageType, in interface{}, msgpackUseNewTimeFormat bool) (*bytes.Buffer, error) {
 	buf := bytes.NewBuffer(nil)
 	buf.WriteByte(uint8(msgType))
@@ -174,8 +174,9 @@ OUTER:
 // them into one or multiple messages based on the limitations
 // of compound messages (255 messages each, 64KB max message size).
 //
-// The input msgs can be modified in-place. Every returned buffer is owned
-// by the caller and must be released via releaseBuffer after use.
+// The input msgs can be modified in-place. Each returned buffer is freshly
+// allocated and may be retained by the caller; the GC reclaims it when the
+// caller is done.
 func makeCompoundMessages(msgs [][]byte) []*bytes.Buffer {
 	const (
 		maxMsgs      = math.MaxUint8
