@@ -263,14 +263,17 @@ func lzwCompress(src []byte) (*bytes.Buffer, error) {
 	return buf, nil
 }
 
-// maxLZWDecompressedBytes bounds the decompressed size of a single LZW
-// payload. memberlist's TCP push-pull is capped at maxPushStateBytes
-// (20 MiB compressed) and UDP packets at UDPBufferSize (1400 bytes).
-// Anything larger indicates a malformed peer or a decompression
-// bomb (LZW can expand small inputs by orders of magnitude on highly
-// redundant data — e.g., 20 MiB compressed → 2 GiB+ decompressed in the
-// worst case for a crafted payload).
-const maxLZWDecompressedBytes = 64 * 1024 * 1024
+// maxDecompressBytes bounds the decompressed size of any compressed
+// memberlist payload, irrespective of algorithm. Memberlist's TCP push-pull
+// is capped at maxPushStateBytes (20 MiB compressed input) and UDP packets
+// at UDPBufferSize (default 1400 B), so legitimate decoded output sits well
+// below this. The 1 MiB headroom absorbs any compressed-frame metadata
+// expansion. Anything larger indicates a malformed peer or a decompression
+// bomb — LZW can expand small inputs by orders of magnitude on highly
+// redundant data, and snappy.Decode allocates the *claimed* decoded length
+// before reading data, so a tiny frame claiming a multi-GiB body could
+// trigger out-of-memory without this cap.
+const maxDecompressBytes = maxPushStateBytes + 1<<20
 
 // lzwDecompress returns a freshly allocated []byte holding the decompressed
 // payload. The bytes.Buffer used to drain the LZW reader is per-call (its
@@ -297,7 +300,7 @@ func lzwDecompress(src []byte) ([]byte, error) {
 	// doesn't escape across that boundary. Net cost: +1 alloc/op (24 B)
 	// per LZW decompress vs. an unbounded io.Copy — the price of bomb
 	// defense. See compress_test.go BenchmarkDecompressBuffer for numbers.
-	lr := io.LimitedReader{R: r, N: maxLZWDecompressedBytes + 1}
+	lr := io.LimitedReader{R: r, N: maxDecompressBytes + 1}
 
 	var buf bytes.Buffer
 	if _, err := io.Copy(&buf, &lr); err != nil {
@@ -305,8 +308,8 @@ func lzwDecompress(src []byte) ([]byte, error) {
 		return nil, fmt.Errorf("lzwDecompress: read from src: %w", err)
 	}
 	_ = r.Close()
-	if buf.Len() > maxLZWDecompressedBytes {
-		return nil, fmt.Errorf("memberlist: LZW-decompressed payload exceeds %d bytes", maxLZWDecompressedBytes)
+	if buf.Len() > maxDecompressBytes {
+		return nil, fmt.Errorf("memberlist: LZW-decompressed payload exceeds %d bytes", maxDecompressBytes)
 	}
 	return buf.Bytes(), nil
 }
@@ -320,29 +323,20 @@ func snappyCompress(src []byte) (*[]byte, error) {
 	return bufPtr, nil
 }
 
-// maxSnappyDecompressedBytes bounds the decompressed size of a single snappy
-// payload. snappy.DecodedLen returns the *claimed* decoded length from the
-// varint header at the start of src — up to 2^32-1 on 64-bit systems — and
-// snappy.Decode allocates that many bytes before any data is actually
-// decoded. A malicious peer could send a tiny frame claiming a multi-GiB
-// decoded length to trigger out-of-memory. Tracks the LZW cap so both
-// decoders share the same defense-in-depth ceiling.
-const maxSnappyDecompressedBytes = maxLZWDecompressedBytes
-
 // snappyDecompress returns a freshly allocated []byte holding the
 // decompressed payload. snappy.Decode writes into the right-sized dst we
 // allocate here; pooling the dst would force a copy-out (the caller retains
 // the slice indefinitely) and add net overhead, so we don't.
 //
-// The claimed decoded length is checked against maxSnappyDecompressedBytes
-// before allocation so a malformed peer cannot trigger an oversized make().
+// The claimed decoded length is checked against maxDecompressBytes before
+// allocation so a malformed peer cannot trigger an oversized make().
 func snappyDecompress(src []byte) ([]byte, error) {
 	n, err := snappy.DecodedLen(src)
 	if err != nil {
 		return nil, fmt.Errorf("snappy.DecodedLen: %w", err)
 	}
-	if n > maxSnappyDecompressedBytes {
-		return nil, fmt.Errorf("memberlist: snappy-decompressed payload would exceed %d bytes (claimed %d)", maxSnappyDecompressedBytes, n)
+	if n > maxDecompressBytes {
+		return nil, fmt.Errorf("memberlist: snappy-decompressed payload would exceed %d bytes (claimed %d)", maxDecompressBytes, n)
 	}
 	return snappy.Decode(make([]byte, n), src)
 }

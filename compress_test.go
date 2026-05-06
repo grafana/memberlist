@@ -197,19 +197,19 @@ func TestDecompressErrors(t *testing.T) {
 		// assert the decoder refuses to return more than the limit. LZW
 		// on a stream of identical bytes achieves ~1000:1 compression,
 		// so (cap+1) bytes of 'A' compresses down to a few KiB. The
-		// test allocates ~64 MiB of plaintext; gated by testing.Short.
+		// test allocates ~21 MiB of plaintext; gated by testing.Short.
 		t.Run("lzw", func(t *testing.T) {
 			if testing.Short() {
-				t.Skip("allocates ~64 MiB of plaintext; skipping under -short")
+				t.Skip("allocates ~21 MiB of plaintext; skipping under -short")
 			}
-			plain := bytes.Repeat([]byte{'A'}, maxLZWDecompressedBytes+1)
+			plain := bytes.Repeat([]byte{'A'}, maxDecompressBytes+1)
 			buf, err := lzwCompress(plain)
 			require.NoError(t, err)
 			compressed := append([]byte(nil), buf.Bytes()...)
 			releaseBuffer(buf)
 
 			_, err = lzwDecompress(compressed)
-			require.EqualError(t, err, fmt.Sprintf("memberlist: LZW-decompressed payload exceeds %d bytes", maxLZWDecompressedBytes))
+			require.EqualError(t, err, fmt.Sprintf("memberlist: LZW-decompressed payload exceeds %d bytes", maxDecompressBytes))
 		})
 
 		// Snappy carries a varint-encoded decoded length at the start
@@ -220,10 +220,10 @@ func TestDecompressErrors(t *testing.T) {
 		// since the cap check fires on snappy.DecodedLen alone.
 		t.Run("snappy", func(t *testing.T) {
 			var hdr [binary.MaxVarintLen64]byte
-			n := binary.PutUvarint(hdr[:], maxSnappyDecompressedBytes+1)
+			n := binary.PutUvarint(hdr[:], maxDecompressBytes+1)
 
 			_, err := snappyDecompress(hdr[:n])
-			require.EqualError(t, err, fmt.Sprintf("memberlist: snappy-decompressed payload would exceed %d bytes (claimed %d)", maxSnappyDecompressedBytes, maxSnappyDecompressedBytes+1))
+			require.EqualError(t, err, fmt.Sprintf("memberlist: snappy-decompressed payload would exceed %d bytes (claimed %d)", maxDecompressBytes, maxDecompressBytes+1))
 		})
 	})
 
