@@ -171,8 +171,8 @@ func TestCompressDecompress(t *testing.T) {
 // rather than retaining them forever.
 func TestReleaseBuffer_BoundedCap(t *testing.T) {
 	big := getBuffer()
-	big.Write(make([]byte, maxPooledCompressBufCap+1))
-	require.Greater(t, big.Cap(), maxPooledCompressBufCap)
+	big.Write(make([]byte, maxPooledLZWScratchCap+1))
+	require.Greater(t, big.Cap(), maxPooledLZWScratchCap)
 
 	releaseBuffer(big)
 	// We can't directly assert the pool's contents (sync.Pool's interface
@@ -182,7 +182,7 @@ func TestReleaseBuffer_BoundedCap(t *testing.T) {
 	// re-surface here.
 	for i := range 10 {
 		b := getBuffer()
-		require.LessOrEqual(t, b.Cap(), maxPooledCompressBufCap,
+		require.LessOrEqual(t, b.Cap(), maxPooledLZWScratchCap,
 			"oversized buffer leaked through pool on iteration %d", i)
 		releaseBuffer(b)
 	}

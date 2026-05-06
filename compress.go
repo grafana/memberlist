@@ -88,12 +88,20 @@ const (
 	// is part of the wire format and must not be changed.
 	lzwLitWidth = 8
 
-	// maxPooledCompressBufCap bounds the capacity of buffers retained by
-	// the compression-internal pools (LZW scratch *bytes.Buffer and snappy
-	// destination []byte). UDP packets are bounded by UDPBufferSize
-	// (default 1400 bytes); TCP push-pull state is larger but rare.
-	// 256 KiB pools typical cases without retaining outsized payloads.
-	maxPooledCompressBufCap = 256 * 1024
+	// maxPooledLZWScratchCap bounds the capacity of *bytes.Buffer values
+	// retained by bytesBufferPool (LZW scratch). LZW output for a UDP
+	// packet (UDPBufferSize, default 1400 B) is small and bounded; 256 KiB
+	// covers any realistic scratch size without retaining outsized buffers.
+	maxPooledLZWScratchCap = 256 * 1024
+
+	// maxPooledSnappyEncodeCap bounds the capacity of []byte values
+	// retained by snappyEncodeBufPool (snappy destination). Unlike LZW
+	// scratch, snappy.Encode's output scales with input. The cap targets
+	// the high-rate UDP/gossip path and small-to-mid TCP push-pull
+	// bodies; larger push-pull payloads (closer to maxPushStateBytes =
+	// 20 MiB) exceed 4 MiB and are intentionally not pooled, so the
+	// idle-pool footprint stays bounded.
+	maxPooledSnappyEncodeCap = 4 * 1024 * 1024
 )
 
 // bytesBufferPool recycles *bytes.Buffer values used as LZW-scratch space
@@ -103,7 +111,7 @@ const (
 // buffer is not (see encode function).
 //
 // Tuning is for LZW scratch sizes only — do NOT reuse this pool for other
-// callers without revisiting maxPooledCompressBufCap.
+// callers without revisiting maxPooledLZWScratchCap.
 var bytesBufferPool = sync.Pool{
 	New: func() any {
 		return new(bytes.Buffer)
@@ -117,7 +125,7 @@ func getBuffer() *bytes.Buffer {
 }
 
 func releaseBuffer(b *bytes.Buffer) {
-	if b.Cap() > maxPooledCompressBufCap {
+	if b.Cap() > maxPooledLZWScratchCap {
 		return
 	}
 	b.Reset()
@@ -173,7 +181,7 @@ var snappyEncodeBufPool = sync.Pool{
 }
 
 func putSnappyEncodeBuf(p *[]byte) {
-	if cap(*p) > maxPooledCompressBufCap {
+	if cap(*p) > maxPooledSnappyEncodeCap {
 		return
 	}
 	*p = (*p)[:0]
