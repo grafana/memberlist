@@ -510,6 +510,30 @@ func BenchmarkDecompressBuffer(b *testing.B) {
 	}
 }
 
+// BenchmarkMakeCompoundMessage measures the compound-message hot path,
+// which sits behind every gossip-piggyback send. The compound buffer is
+// released back to the encode pool every iteration, so the bench reflects
+// steady-state pool-warm cost.
+func BenchmarkMakeCompoundMessage(b *testing.B) {
+	sizes := []int{64, 256, 1500}
+	counts := []int{1, 8, 64}
+	for _, sz := range sizes {
+		for _, n := range counts {
+			msgs := make([][]byte, n)
+			for i := range msgs {
+				msgs[i] = randBytes(sz)
+			}
+			b.Run(fmt.Sprintf("%d-msgs-of-%d", n, sz), func(b *testing.B) {
+				b.ReportAllocs()
+				for b.Loop() {
+					buf := makeCompoundMessage(msgs)
+					releaseEncodeBuffer(buf)
+				}
+			})
+		}
+	}
+}
+
 // FuzzCompressDecompressRoundTrip exercises every supported algorithm with
 // arbitrary inputs and asserts the decompressed payload byte-equals the input.
 // Catches regressions in dispatch, pool reset hygiene, and snappy/LZW glue.

@@ -74,6 +74,15 @@ func releaseEncodeBuffer(b *bytes.Buffer) {
 	encodeBufPool.Put(b)
 }
 
+// releaseEncodeBuffers releases each buffer in bufs to the encode pool. A
+// helper rather than an inline loop so callers can `defer releaseEncodeBuffers(...)`
+// without paying the closure-literal heap allocation.
+func releaseEncodeBuffers(bufs []*bytes.Buffer) {
+	for _, b := range bufs {
+		releaseEncodeBuffer(b)
+	}
+}
+
 // encode writes an encoded object to a buffer drawn from encodeBufPool.
 // On success the caller MUST releaseEncodeBuffer the returned buffer
 // once its bytes are no longer needed; typical usage is
@@ -220,9 +229,9 @@ OUTER:
 // them into one or multiple messages based on the limitations
 // of compound messages (255 messages each, 64KB max message size).
 //
-// The input msgs can be modified in-place. Each returned buffer is freshly
-// allocated and may be retained by the caller; the GC reclaims it when the
-// caller is done.
+// The input msgs can be modified in-place. Each returned buffer is drawn
+// from encodeBufPool; the caller MUST releaseEncodeBuffer each one once
+// its bytes have been consumed.
 func makeCompoundMessages(msgs [][]byte) []*bytes.Buffer {
 	const (
 		maxMsgs      = math.MaxUint8
@@ -244,8 +253,17 @@ func makeCompoundMessages(msgs [][]byte) []*bytes.Buffer {
 			continue
 		}
 
-		// This message is a large one, so we send it alone.
-		bufs = append(bufs, bytes.NewBuffer(msgs[r]))
+		// This message is a large one, so we send it alone. Copy into a
+		// pool buffer (rather than the previous bytes.NewBuffer(msgs[r])
+		// alias) so every entry in bufs shares a single ownership model
+		// and the caller can `releaseEncodeBuffers(bufs)` uniformly.
+		// Pooling the alias would put a buffer that wraps caller-owned
+		// memory into the pool, and the next pool consumer's writes
+		// would corrupt the original — the copy is the correctness
+		// price of the uniform release.
+		buf := getEncodeBuffer()
+		buf.Write(msgs[r])
+		bufs = append(bufs, buf)
 		r++
 	}
 	msgs = msgs[:w]
@@ -262,11 +280,11 @@ func makeCompoundMessages(msgs [][]byte) []*bytes.Buffer {
 }
 
 // makeCompoundMessage takes a list of messages and generates a single
-// compound message containing all of them. The returned buffer is owned by
-// the caller; its bytes can be passed to an async transport so it is not
-// pooled.
+// compound message containing all of them. The returned buffer is drawn
+// from encodeBufPool; the caller MUST releaseEncodeBuffer it once the
+// bytes have been consumed.
 func makeCompoundMessage(msgs [][]byte) *bytes.Buffer {
-	buf := bytes.NewBuffer(nil)
+	buf := getEncodeBuffer()
 
 	// Write out the type
 	buf.WriteByte(uint8(compoundMsg))

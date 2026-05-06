@@ -804,6 +804,7 @@ func (m *Memberlist) sendMsg(a Address, msg []byte) error {
 
 	// Create one or more compound messages.
 	compounds := makeCompoundMessages(msgs)
+	defer releaseEncodeBuffers(compounds)
 
 	// Send the messages.
 	for _, compound := range compounds {

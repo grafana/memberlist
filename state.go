@@ -373,6 +373,7 @@ func (m *Memberlist) probeNode(node *NodeState) {
 		msgs = append(msgs, suspectBuf.Bytes())
 
 		compound := makeCompoundMessage(msgs)
+		defer releaseEncodeBuffer(compound)
 		if err := m.rawSendMsgPacket(node.FullAddress(), &node.Node, compound.Bytes()); err != nil {
 			m.logger.Printf("[ERR] memberlist: Failed to send UDP compound ping and suspect message to %s: %s", addr, err)
 			if failedRemote(err) {
@@ -642,6 +643,9 @@ func (m *Memberlist) gossip() {
 					m.logger.Printf("[ERR] memberlist: Failed to send gossip to %s: %s", addr, err)
 				}
 			}
+			// Release the pooled compound buffers promptly — defer would
+			// stack across all kNodes and only fire on gossip's return.
+			releaseEncodeBuffers(compounds)
 		}
 	}
 }
