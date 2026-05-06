@@ -98,8 +98,8 @@ type Memberlist struct {
 	compressMetricLabels []metrics.Label
 
 	// compressSkippedSizeWorseLabels is compressMetricLabels + a
-	// reason="size_worse_than_original" label, precomputed so the size-
-	// skipped fallback path doesn't allocate when fired (incompressible
+	// reason label, precomputed so the size-skipped fallback path
+	// doesn't allocate when fired (incompressible
 	// payloads can hit this often enough to matter).
 	compressSkippedSizeWorseLabels []metrics.Label
 
@@ -107,7 +107,7 @@ type Memberlist struct {
 	// an "algo" label set to the corresponding algorithm name. The
 	// receive path reads the algorithm from each incoming
 	// compressedPayload and dispatches via decompressLabels. unknownAlgo
-	// (255) is handled inline by decompressLabels' default arm.
+	// is handled inline by decompressLabels' default arm.
 	decompressLZWLabels    []metrics.Label
 	decompressSnappyLabels []metrics.Label
 }

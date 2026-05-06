@@ -1268,7 +1268,7 @@ func (m *Memberlist) readStream(conn net.Conn, streamLabel string) (messageType,
 		var c compressedPayload
 		if err := dec.Decode(&c); err != nil {
 			// Wrapper-decode failure happens before any algo tag is read
-			// from the wire; emit with algo="unknown" so the metric is
+			// from the wire; emit with unknownAlgo so the metric is
 			// symmetric with handleCompressed (UDP) which routes the same
 			// case via decompressPayload's unknownAlgo sentinel. attempts
 			// counts everything we tried to decompress, including malformed

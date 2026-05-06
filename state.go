@@ -643,8 +643,6 @@ func (m *Memberlist) gossip() {
 					m.logger.Printf("[ERR] memberlist: Failed to send gossip to %s: %s", addr, err)
 				}
 			}
-			// Release the pooled compound buffers promptly — defer would
-			// stack across all kNodes and only fire on gossip's return.
 			releaseEncodeBuffers(compounds)
 		}
 	}

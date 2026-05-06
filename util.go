@@ -43,9 +43,7 @@ func decode(buf []byte, out interface{}) error {
 // subsequent calls reuse the grown slice instead of reallocating.
 //
 // Pool callers MUST releaseEncodeBuffer once they are done with the
-// returned buffer's bytes — typically via defer right after the encode()
-// call returns successfully and the bytes have been consumed (sent on the
-// wire, copied out, etc.).
+// returned buffer's bytes.
 var encodeBufPool = sync.Pool{
 	New: func() any {
 		return new(bytes.Buffer)
@@ -84,8 +82,7 @@ func releaseEncodeBuffers(bufs []*bytes.Buffer) {
 }
 
 // pushPullBufPool recycles *bytes.Buffer values used on the TCP push-pull
-// path and other large-buffer call sites (sendLocalState, encryptLocalState,
-// decryptRemoteState, sendUserMsg). Push-pull state can approach
+// path and other large-buffer call sites. Push-pull state can approach
 // maxPushStateBytes (20 MiB), which exceeds encodeBufPool's cap policy by a
 // long way; a dedicated pool with its own ceiling lets us reuse those
 // large buffers without bloating the encode pool's idle footprint.
@@ -105,7 +102,7 @@ var pushPullBufPool = sync.Pool{
 //
 // This cap is for pool sizing only; it is NOT a security boundary. Size
 // enforcement against malicious peers lives at decryptRemoteState's
-// explicit `moreBytes > maxPushStateBytes` check (net.go) — do not rely
+// explicit `moreBytes > maxPushStateBytes` check — do not rely
 // on this constant to reject oversized incoming state.
 const maxPooledPushPullBufCap = 32 * 1024 * 1024
 
@@ -135,8 +132,7 @@ func releasePushPullBuffer(b *bytes.Buffer) {
 
 // encode writes an encoded object to a buffer drawn from encodeBufPool.
 // On success the caller MUST releaseEncodeBuffer the returned buffer
-// once its bytes are no longer needed; typical usage is
-// `defer releaseEncodeBuffer(buf)` immediately after the err check.
+// once its bytes are no longer needed.
 //
 // On error the returned buffer is nil; any pool buffer acquired
 // internally has already been released, so the caller does not need to
