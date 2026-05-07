@@ -4,7 +4,6 @@
 package memberlist
 
 import (
-	"bytes"
 	"fmt"
 
 	metrics "github.com/hashicorp/go-metrics/compat"
@@ -63,14 +62,10 @@ type compressedPayload struct {
 }
 
 // compressPayload takes an opaque input buffer, compresses it using the
-// requested algo, and wraps the result in a compressedPayload that is
-// encoded as a compressMsg frame.
-//
-// On success the returned *bytes.Buffer is drawn from encodeBufPool; the
-// caller MUST releaseEncodeBuffer it once the bytes have been consumed.
-// On error a nil buffer is returned and the caller does not need to
-// release.
-func compressPayload(algo compressionType, inp []byte, msgpackUseNewTimeFormat bool) (*bytes.Buffer, error) {
+// requested algo, and wraps the result in a compressedPayload encoded
+// as a compressMsg frame. Returns a freshly-allocated byte slice owned
+// by the caller. On error a nil slice is returned.
+func compressPayload(algo compressionType, inp []byte, msgpackUseNewTimeFormat bool) ([]byte, error) {
 	var encoded []byte
 	switch algo {
 	case lzwAlgo:

@@ -4,7 +4,6 @@
 package memberlist
 
 import (
-	"bytes"
 	"fmt"
 	"reflect"
 	"testing"
@@ -48,14 +47,31 @@ func TestEncodeDecode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected err: %s", err)
 	}
-	defer releaseEncodeBuffer(buf)
 	var out ping
-	if err := decode(buf.Bytes()[1:], &out); err != nil {
+	if err := decode(buf[1:], &out); err != nil {
 		t.Fatalf("unexpected err: %s", err)
 	}
 	if msg.SeqNo != out.SeqNo {
 		t.Fatalf("bad sequence no")
 	}
+}
+
+func TestEncode_DoesNotRetainScratch(t *testing.T) {
+	// Lock down the contract: encode returns a slice that is independent
+	// of any internal pool, so subsequent encode calls (which churn the
+	// same pool) cannot mutate an earlier return.
+	msg := &ping{SeqNo: 100}
+	out, err := encode(pingMsg, msg, false)
+	require.NoError(t, err)
+	snapshot := append([]byte(nil), out...)
+
+	for range 5 {
+		churn := &ping{SeqNo: 999}
+		_, err := encode(pingMsg, churn, false)
+		require.NoError(t, err)
+	}
+
+	require.Equal(t, snapshot, out)
 }
 
 func TestRandomOffset(t *testing.T) {
@@ -434,15 +450,31 @@ func TestMakeCompoundMessage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected err: %s", err)
 	}
-	defer releaseEncodeBuffer(buf)
 
-	msgs := [][]byte{buf.Bytes(), buf.Bytes(), buf.Bytes()}
+	msgs := [][]byte{buf, buf, buf}
 	compound := makeCompoundMessage(msgs)
-	defer releaseEncodeBuffer(compound)
 
-	if compound.Len() != 3*buf.Len()+3*compoundOverhead+compoundHeaderOverhead {
+	if len(compound) != 3*len(buf)+3*compoundOverhead+compoundHeaderOverhead {
 		t.Fatalf("bad len")
 	}
+}
+
+func TestMakeCompoundMessage_DoesNotRetainScratch(t *testing.T) {
+	// Lock down the contract: makeCompoundMessage returns a slice that is
+	// independent of any internal pool, so subsequent calls (which churn
+	// the same pool) cannot mutate an earlier return.
+	msg := &ping{SeqNo: 100}
+	buf, err := encode(pingMsg, msg, false)
+	require.NoError(t, err)
+
+	out := makeCompoundMessage([][]byte{buf, buf, buf})
+	snapshot := append([]byte(nil), out...)
+
+	for range 5 {
+		makeCompoundMessage([][]byte{buf, buf, buf, buf})
+	}
+
+	require.Equal(t, snapshot, out)
 }
 
 func TestDecodeCompoundMessage(t *testing.T) {
@@ -451,13 +483,11 @@ func TestDecodeCompoundMessage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected err: %s", err)
 	}
-	defer releaseEncodeBuffer(buf)
 
-	msgs := [][]byte{buf.Bytes(), buf.Bytes(), buf.Bytes()}
+	msgs := [][]byte{buf, buf, buf}
 	compound := makeCompoundMessage(msgs)
-	defer releaseEncodeBuffer(compound)
 
-	trunc, parts, err := decodeCompoundMessage(compound.Bytes()[1:])
+	trunc, parts, err := decodeCompoundMessage(compound[1:])
 	if err != nil {
 		t.Fatalf("unexpected err: %s", err)
 	}
@@ -468,7 +498,7 @@ func TestDecodeCompoundMessage(t *testing.T) {
 		t.Fatalf("bad parts")
 	}
 	for _, p := range parts {
-		if len(p) != buf.Len() {
+		if len(p) != len(buf) {
 			t.Fatalf("bad part len")
 		}
 	}
@@ -487,13 +517,11 @@ func TestDecodeCompoundMessage_Trunc(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected err: %s", err)
 	}
-	defer releaseEncodeBuffer(buf)
 
-	msgs := [][]byte{buf.Bytes(), buf.Bytes(), buf.Bytes()}
+	msgs := [][]byte{buf, buf, buf}
 	compound := makeCompoundMessage(msgs)
-	defer releaseEncodeBuffer(compound)
 
-	trunc, parts, err := decodeCompoundMessage(compound.Bytes()[1:38])
+	trunc, parts, err := decodeCompoundMessage(compound[1:38])
 	if err != nil {
 		t.Fatalf("unexpected err: %s", err)
 	}
@@ -504,7 +532,7 @@ func TestDecodeCompoundMessage_Trunc(t *testing.T) {
 		t.Fatalf("bad parts")
 	}
 	for _, p := range parts {
-		if len(p) != buf.Len() {
+		if len(p) != len(buf) {
 			t.Fatalf("bad part len")
 		}
 	}
@@ -526,30 +554,13 @@ func TestMakeCompoundMessages(t *testing.T) {
 		bigMsgPayloadLength   = 70000
 	)
 
-	var encodeBufs []*bytes.Buffer
-	t.Cleanup(func() {
-		releaseEncodeBuffers(encodeBufs)
-	})
-
-	// makeCompound wraps makeCompoundMessage so the returned buffer is
-	// tracked for cleanup. Inline `makeCompoundMessage(s).Bytes()` would
-	// leak the buffer because the *bytes.Buffer goes out of scope as
-	// the expression completes.
-	makeCompound := func(msgs [][]byte) []byte {
-		buf := makeCompoundMessage(msgs)
-		encodeBufs = append(encodeBufs, buf)
-		return buf.Bytes()
-	}
-
 	// Generate some fixtures.
 	smallMessages := make([][]byte, 300)
 	for i := 0; i < len(smallMessages); i++ {
 		msg := &ackResp{SeqNo: smallMsgSeqNo, Payload: []byte{byte(i)}}
 		encoded, err := encode(ackRespMsg, msg, false)
 		require.NoError(t, err)
-		encodeBufs = append(encodeBufs, encoded)
-
-		smallMessages[i] = encoded.Bytes()
+		smallMessages[i] = encoded
 	}
 
 	bigMessages := make([][]byte, 3)
@@ -560,9 +571,7 @@ func TestMakeCompoundMessages(t *testing.T) {
 		msg := &ackResp{SeqNo: bigMsgSeqNo, Payload: payload}
 		encoded, err := encode(ackRespMsg, msg, false)
 		require.NoError(t, err)
-		encodeBufs = append(encodeBufs, encoded)
-
-		bigMessages[i] = encoded.Bytes()
+		bigMessages[i] = encoded
 	}
 
 	tests := map[string]struct {
@@ -575,17 +584,17 @@ func TestMakeCompoundMessages(t *testing.T) {
 		},
 		"one small message": {
 			input:    smallMessages[0:1],
-			expected: [][]byte{makeCompound(smallMessages[0:1])},
+			expected: [][]byte{makeCompoundMessage(smallMessages[0:1])},
 		},
 		"few small messages": {
 			input:    smallMessages[0:3],
-			expected: [][]byte{makeCompound(smallMessages[0:3])},
+			expected: [][]byte{makeCompoundMessage(smallMessages[0:3])},
 		},
 		"many small messages (more than 255)": {
 			input: smallMessages[0:300],
 			expected: [][]byte{
-				makeCompound(smallMessages[0:255]),
-				makeCompound(smallMessages[255:300]),
+				makeCompoundMessage(smallMessages[0:255]),
+				makeCompoundMessage(smallMessages[255:300]),
 			},
 		},
 		"one big message": {
@@ -613,8 +622,8 @@ func TestMakeCompoundMessages(t *testing.T) {
 				bigMessages[0],
 				bigMessages[1],
 				bigMessages[2],
-				makeCompound(smallMessages[0:255]),
-				makeCompound(smallMessages[255:300]),
+				makeCompoundMessage(smallMessages[0:255]),
+				makeCompoundMessage(smallMessages[255:300]),
 			},
 		},
 	}
@@ -622,19 +631,12 @@ func TestMakeCompoundMessages(t *testing.T) {
 	for testName, testData := range tests {
 		t.Run(testName, func(t *testing.T) {
 			actual := makeCompoundMessages(testData.input)
-			defer releaseEncodeBuffers(actual)
 
-			// Get the actual []byte of each message.
-			actualBytes := make([][]byte, 0, len(actual))
-			for _, data := range actual {
-				actualBytes = append(actualBytes, data.Bytes())
-			}
-
-			assert.Equal(t, testData.expected, actualBytes)
+			assert.Equal(t, testData.expected, actual)
 
 			// Ensure we can successfully decode every message.
 			for i := 0; i < len(actual); i++ {
-				msg := actualBytes[i]
+				msg := actual[i]
 				typ := messageType(msg[0])
 
 				switch typ {

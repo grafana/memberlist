@@ -268,9 +268,8 @@ func (m *Memberlist) handleConn(conn net.Conn) {
 				m.logger.Printf("[ERR] memberlist: Failed to encode error response: %s", err)
 				return
 			}
-			defer releaseEncodeBuffer(out)
 
-			err = m.rawSendMsgStream(conn, out.Bytes(), streamLabel)
+			err = m.rawSendMsgStream(conn, out, streamLabel)
 			if err != nil {
 				m.logger.Printf("[ERR] memberlist: Failed to send error: %s %s", err, LogConn(conn))
 				return
@@ -328,9 +327,8 @@ func (m *Memberlist) handleConn(conn net.Conn) {
 			m.logger.Printf("[ERR] memberlist: Failed to encode ack: %s", err)
 			return
 		}
-		defer releaseEncodeBuffer(out)
 
-		err = m.rawSendMsgStream(conn, out.Bytes(), streamLabel)
+		err = m.rawSendMsgStream(conn, out, streamLabel)
 		if err != nil {
 			m.logger.Printf("[ERR] memberlist: Failed to send ack: %s %s", err, LogConn(conn))
 			return
@@ -798,8 +796,7 @@ func (m *Memberlist) encodeAndSendMsg(a Address, msgType messageType, msg interf
 	if err != nil {
 		return err
 	}
-	defer releaseEncodeBuffer(out)
-	if err := m.sendMsg(a, out.Bytes()); err != nil {
+	if err := m.sendMsg(a, out); err != nil {
 		return err
 	}
 	return nil
@@ -827,11 +824,10 @@ func (m *Memberlist) sendMsg(a Address, msg []byte) error {
 
 	// Create one or more compound messages.
 	compounds := makeCompoundMessages(msgs)
-	defer releaseEncodeBuffers(compounds)
 
 	// Send the messages.
 	for _, compound := range compounds {
-		if err := m.rawSendMsgPacket(a, nil, compound.Bytes()); err != nil {
+		if err := m.rawSendMsgPacket(a, nil, compound); err != nil {
 			return err
 		}
 	}
@@ -855,18 +851,15 @@ func (m *Memberlist) rawSendMsgPacket(a Address, node *Node, msg []byte) error {
 			metrics.IncrCounterWithLabels(metricCompressErrors, 1,
 				m.compressMetricLabels)
 			m.logger.Printf("[WARN] memberlist: Failed to compress payload: %v", err)
+		} else if len(buf) < len(msg) {
+			// Compression reduced the size; emit the compressed bytes.
+			msg = buf
 		} else {
-			defer releaseEncodeBuffer(buf)
-			if buf.Len() < len(msg) {
-				// Compression reduced the size; emit the compressed bytes.
-				msg = buf.Bytes()
-			} else {
-				// Compressed payload was no smaller than the input — fall
-				// back to plaintext to avoid paying encryption + network
-				// cost on a worse-than-original payload.
-				metrics.IncrCounterWithLabels(metricCompressSkipped, 1,
-					m.compressSkippedSizeWorseLabels)
-			}
+			// Compressed payload was no smaller than the input — fall
+			// back to plaintext to avoid paying encryption + network
+			// cost on a worse-than-original payload.
+			metrics.IncrCounterWithLabels(metricCompressSkipped, 1,
+				m.compressSkippedSizeWorseLabels)
 		}
 	}
 
@@ -898,10 +891,11 @@ func (m *Memberlist) rawSendMsgPacket(a Address, node *Node, msg []byte) error {
 
 	// Check if we have encryption enabled
 	if m.config.EncryptionEnabled() && m.config.GossipVerifyOutgoing {
-		// Encrypt the payload. Reuse the encode pool: same buffer kind,
+		// Encrypt the payload. Use the encode pool: same buffer kind,
 		// same sizing requirements (encrypted output sits within an
-		// MTU-sized packet for any UDP send). The deferred release fires
-		// after WriteToAddress below has consumed the bytes.
+		// MTU-sized packet for any UDP send). Copy out before
+		// WriteToAddress so the pool buffer doesn't escape into the
+		// transport layer.
 		primaryKey := m.config.Keyring.GetPrimaryKey()
 		packetLabel := []byte(m.config.Label)
 		encryptBuf := getEncodeBuffer()
@@ -910,7 +904,7 @@ func (m *Memberlist) rawSendMsgPacket(a Address, node *Node, msg []byte) error {
 			m.logger.Printf("[ERR] memberlist: Encryption of message failed: %v", err)
 			return err
 		}
-		msg = encryptBuf.Bytes()
+		msg = bytes.Clone(encryptBuf.Bytes())
 	}
 
 	metrics.IncrCounterWithLabels([]string{"memberlist", "udp", "sent"}, float32(len(msg)), m.metricLabels)
@@ -920,6 +914,8 @@ func (m *Memberlist) rawSendMsgPacket(a Address, node *Node, msg []byte) error {
 
 // rawSendMsgStream is used to stream a message to another host without
 // modification, other than applying compression and encryption if enabled.
+// sendBuf may be backed by pool memory owned by the caller; it is read
+// synchronously and must not be retained past this function's return.
 func (m *Memberlist) rawSendMsgStream(conn net.Conn, sendBuf []byte, streamLabel string) error {
 	// Check if compression is enabled
 	if m.config.EnableCompression {
@@ -930,19 +926,16 @@ func (m *Memberlist) rawSendMsgStream(conn net.Conn, sendBuf []byte, streamLabel
 			metrics.IncrCounterWithLabels(metricCompressErrors, 1,
 				m.compressMetricLabels)
 			m.logger.Printf("[ERROR] memberlist: Failed to compress payload: %v", err)
+		} else if len(compBuf) < len(sendBuf) {
+			// Compression reduced the size; emit the compressed bytes.
+			sendBuf = compBuf
 		} else {
-			defer releaseEncodeBuffer(compBuf)
-			if compBuf.Len() < len(sendBuf) {
-				// Compression reduced the size; emit the compressed bytes.
-				sendBuf = compBuf.Bytes()
-			} else {
-				// Compressed payload was no smaller than the input — fall
-				// back to plaintext to avoid paying encryption + network
-				// cost on a worse-than-original payload. Mirrors
-				// rawSendMsgPacket.
-				metrics.IncrCounterWithLabels(metricCompressSkipped, 1,
-					m.compressSkippedSizeWorseLabels)
-			}
+			// Compressed payload was no smaller than the input — fall
+			// back to plaintext to avoid paying encryption + network
+			// cost on a worse-than-original payload. Mirrors
+			// rawSendMsgPacket.
+			metrics.IncrCounterWithLabels(metricCompressSkipped, 1,
+				m.compressSkippedSizeWorseLabels)
 		}
 	}
 
@@ -953,8 +946,7 @@ func (m *Memberlist) rawSendMsgStream(conn net.Conn, sendBuf []byte, streamLabel
 			m.logger.Printf("[ERROR] memberlist: Failed to encrypt local state: %v", err)
 			return err
 		}
-		defer releasePushPullBuffer(cryptBuf)
-		sendBuf = cryptBuf.Bytes()
+		sendBuf = cryptBuf
 	}
 
 	// Write out the entire send buffer
@@ -1136,16 +1128,16 @@ func (m *Memberlist) sendLocalState(conn net.Conn, join bool, streamLabel string
 	moreBytes := binary.BigEndian.Uint32(bufConn.Bytes()[1:5])
 	metrics.SetGaugeWithLabels([]string{"memberlist", "size", "local"}, float32(moreBytes), m.metricLabels)
 
-	// Get the send buffer
 	return m.rawSendMsgStream(conn, bufConn.Bytes(), streamLabel)
 }
 
-// encryptLocalState encrypts a local-state payload for stream send. The
-// returned *bytes.Buffer is drawn from pushPullBufPool; the caller MUST
-// releasePushPullBuffer it once the bytes have been consumed. On error
-// nil is returned and any pool buffer has already been released.
-func (m *Memberlist) encryptLocalState(sendBuf []byte, streamLabel string) (*bytes.Buffer, error) {
+// encryptLocalState encrypts a local-state payload for stream send.
+// Returns a freshly-allocated byte slice owned by the caller; the
+// internal pool buffer is released before return. On error nil is
+// returned.
+func (m *Memberlist) encryptLocalState(sendBuf []byte, streamLabel string) ([]byte, error) {
 	buf := getPushPullBuffer()
+	defer releasePushPullBuffer(buf)
 
 	// Write the encryptMsg byte
 	buf.WriteByte(byte(encryptMsg))
@@ -1166,10 +1158,9 @@ func (m *Memberlist) encryptLocalState(sendBuf []byte, streamLabel string) (*byt
 	// Write the encrypted cipher text to the buffer
 	key := m.config.Keyring.GetPrimaryKey()
 	if err := encryptPayload(encVsn, key, sendBuf, dataBytes, buf); err != nil {
-		releasePushPullBuffer(buf)
 		return nil, err
 	}
-	return buf, nil
+	return bytes.Clone(buf.Bytes()), nil
 }
 
 // decryptRemoteState is used to help decrypt the remote state
@@ -1437,9 +1428,8 @@ func (m *Memberlist) sendPingAndWaitForAck(a Address, ping ping, deadline time.T
 	if err != nil {
 		return false, err
 	}
-	defer releaseEncodeBuffer(out)
 
-	if err = m.rawSendMsgStream(conn, out.Bytes(), m.config.Label); err != nil {
+	if err = m.rawSendMsgStream(conn, out, m.config.Label); err != nil {
 		return false, err
 	}
 

@@ -53,9 +53,8 @@ func TestCompressDecompress(t *testing.T) {
 					input := randBytes(size)
 					buf, err := compressPayload(algo, input, false)
 					require.NoError(t, err)
-					defer releaseEncodeBuffer(buf)
 
-					gotAlgo, decoded, err := decompressPayload(buf.Bytes()[1:])
+					gotAlgo, decoded, err := decompressPayload(buf[1:])
 					require.NoError(t, err)
 					require.Equal(t, algo, gotAlgo)
 					require.Equal(t, input, decoded)
@@ -73,11 +72,10 @@ func TestCompressDecompress(t *testing.T) {
 				input := []byte("the quick brown fox jumps over the lazy dog")
 				buf, err := compressPayload(senderAlgo, input, false)
 				require.NoError(t, err)
-				defer releaseEncodeBuffer(buf)
 
 				// The receiver dispatches off the on-wire algo tag, never off
 				// any local config — exercise both code paths via decompressPayload.
-				gotAlgo, decoded, err := decompressPayload(buf.Bytes()[1:])
+				gotAlgo, decoded, err := decompressPayload(buf[1:])
 				require.NoError(t, err)
 				require.Equal(t, senderAlgo, gotAlgo)
 				require.Equal(t, input, decoded)
@@ -102,8 +100,7 @@ func TestCompressDecompress(t *testing.T) {
 					if !assert.NoError(t, err) {
 						return
 					}
-					gotAlgo, decoded, err := decompressPayload(buf.Bytes()[1:])
-					releaseEncodeBuffer(buf)
+					gotAlgo, decoded, err := decompressPayload(buf[1:])
 					if !assert.NoError(t, err) {
 						return
 					}
@@ -131,45 +128,42 @@ func TestCompressDecompress(t *testing.T) {
 
 				bufLong, err := compressPayload(algo, long, false)
 				require.NoError(t, err)
-				defer releaseEncodeBuffer(bufLong)
-				_, decLong, err := decompressPayload(bufLong.Bytes()[1:])
+				_, decLong, err := decompressPayload(bufLong[1:])
 				require.NoError(t, err)
 				require.Equal(t, long, decLong)
 
 				bufShort, err := compressPayload(algo, short, false)
 				require.NoError(t, err)
-				defer releaseEncodeBuffer(bufShort)
-				_, decShort, err := decompressPayload(bufShort.Bytes()[1:])
+				_, decShort, err := decompressPayload(bufShort[1:])
 				require.NoError(t, err)
 				require.Equal(t, short, decShort)
 			})
 		}
 	})
 
-	// Verify the contract that makes pooling
-	// correct: msgpack synchronously copies the inner Buf into the outer
-	// encoded buffer, so once compressPayload returns the inner pooled
-	// scratch can be reused without affecting the returned bytes.
+	// Lock down the contract: compressPayload returns a slice that is
+	// independent of any internal pool, so subsequent compressPayload
+	// calls (which churn the same pools) cannot mutate an earlier
+	// return. A regression that returned pool memory would let the
+	// churn loop overwrite buf's underlying array, breaking the
+	// snapshot equality.
 	t.Run("DoesNotRetainScratch", func(t *testing.T) {
 		for _, algo := range []compressionType{lzwAlgo, snappyAlgo} {
 			t.Run(algoLabel(algo), func(t *testing.T) {
 				input := bytes.Repeat([]byte("xy"), 512)
 				buf, err := compressPayload(algo, input, false)
 				require.NoError(t, err)
-				defer releaseEncodeBuffer(buf)
-				snapshot := append([]byte(nil), buf.Bytes()...)
+				snapshot := append([]byte(nil), buf...)
 
-				// Force pool churn: do another encode of different bytes,
-				// release, and re-encode several times. If the first call
-				// retained any reference into pooled scratch, the snapshot
-				// would diverge from the live buffer.
+				// Force pool churn: do several more encodes of different bytes.
+				// If compressPayload retained any reference into pooled scratch,
+				// the snapshot would diverge from buf.
 				for range 5 {
-					other, err := compressPayload(algo, []byte(strings.Repeat("z", 1024)), false)
+					_, err := compressPayload(algo, []byte(strings.Repeat("z", 1024)), false)
 					require.NoError(t, err)
-					releaseEncodeBuffer(other)
 				}
 
-				require.Equal(t, snapshot, buf.Bytes())
+				require.Equal(t, snapshot, buf)
 			})
 		}
 	})
@@ -401,12 +395,9 @@ func TestDecompressBuffer_MalformedBody(t *testing.T) {
 				wrapped, err := compressPayload(tc.algo, input, false)
 				require.NoError(t, err)
 				var c compressedPayload
-				require.NoError(t, decode(wrapped.Bytes()[1:], &c))
-				releaseEncodeBuffer(wrapped)
+				require.NoError(t, decode(wrapped[1:], &c))
 
-				// Copy out before truncating; c.Buf may alias pool memory.
-				truncated := append([]byte(nil), c.Buf[:len(c.Buf)/2]...)
-				_, err = decompressBuffer(&compressedPayload{Algo: tc.algo, Buf: truncated})
+				_, err = decompressBuffer(&compressedPayload{Algo: tc.algo, Buf: c.Buf[:len(c.Buf)/2]})
 				require.ErrorContains(t, err, tc.errContains)
 			})
 		})
@@ -414,22 +405,16 @@ func TestDecompressBuffer_MalformedBody(t *testing.T) {
 }
 
 // TestEncodeRoundTrip verifies repeated encode/decode calls each produce
-// independently correct bytes. encode() doesn't pool its output buffer
-// (see comment in util.go), so this guards basic correctness across calls.
+// independently correct bytes.
 func TestEncodeRoundTrip(t *testing.T) {
 	const inputs = 32
-	var encodeBufs []*bytes.Buffer
-	t.Cleanup(func() {
-		releaseEncodeBuffers(encodeBufs)
-	})
 	for i := range inputs {
 		buf, err := encode(pingMsg, &ping{SeqNo: uint32(i), Node: "n"}, false)
 		require.NoError(t, err)
-		require.Greater(t, buf.Len(), 0)
-		encodeBufs = append(encodeBufs, buf)
+		require.Greater(t, len(buf), 0)
 
 		var p ping
-		require.NoError(t, decode(buf.Bytes()[1:], &p))
+		require.NoError(t, decode(buf[1:], &p))
 		require.Equal(t, uint32(i), p.SeqNo)
 	}
 }
@@ -559,36 +544,8 @@ func BenchmarkCompressPayload(b *testing.B) {
 					b.ResetTimer()
 					b.ReportAllocs()
 					for b.Loop() {
-						buf, err := compressPayload(algo, src, false)
+						_, err := compressPayload(algo, src, false)
 						require.NoError(b, err)
-						releaseEncodeBuffer(buf)
-					}
-				})
-			}
-		}
-	}
-}
-
-// BenchmarkCompressPayloadColdPool exercises the cold-buffer path for
-// compressPayload: each iteration drops the returned encode buffer
-// instead of releasing it, so the next call hits encodeBufPool's New
-// func and pays the staircase of grow events the buffer would otherwise
-// incur. BenchmarkCompressPayload is steady-state; this bench is what
-// makes a size-hint optimization on encode() measurable.
-func BenchmarkCompressPayloadColdPool(b *testing.B) {
-	sizes := []int{64, 256, 1500, 16 * 1024}
-	assertBenchSizes(b, sizes)
-	for _, c := range benchCorpora() {
-		for _, algo := range []compressionType{lzwAlgo, snappyAlgo} {
-			for _, size := range sizes {
-				b.Run(fmt.Sprintf("%s/%s/%d", c.name, algoLabel(algo), size), func(b *testing.B) {
-					src := c.payload[:size]
-					b.ResetTimer()
-					b.ReportAllocs()
-					for b.Loop() {
-						buf, err := compressPayload(algo, src, false)
-						require.NoError(b, err)
-						_ = buf
 					}
 				})
 			}
@@ -597,7 +554,7 @@ func BenchmarkCompressPayloadColdPool(b *testing.B) {
 }
 
 // BenchmarkEncode isolates the encode() path (msgpack only, no
-// compression) so the encode-buffer pool's effect is directly observable.
+// compression).
 func BenchmarkEncode(b *testing.B) {
 	sizes := []int{64, 256, 1500, 16 * 1024}
 	assertBenchSizes(b, sizes)
@@ -608,33 +565,8 @@ func BenchmarkEncode(b *testing.B) {
 				b.ResetTimer()
 				b.ReportAllocs()
 				for b.Loop() {
-					buf, err := encode(compressMsg, payload, false)
+					_, err := encode(compressMsg, payload, false)
 					require.NoError(b, err)
-					releaseEncodeBuffer(buf)
-				}
-			})
-		}
-	}
-}
-
-// BenchmarkEncodeColdPool exercises the cold-buffer path: each iteration
-// drops the encoded buffer on the floor instead of releasing it back, so
-// the next Get hits encodeBufPool's New func and pays the first-write
-// growth cost. BenchmarkEncode is steady-state (pool-warm) and won't move
-// when the pool's initial capacity changes; this bench will.
-func BenchmarkEncodeColdPool(b *testing.B) {
-	sizes := []int{64, 256, 1500, 16 * 1024}
-	assertBenchSizes(b, sizes)
-	for _, c := range benchCorpora() {
-		for _, size := range sizes {
-			b.Run(fmt.Sprintf("%s/%d", c.name, size), func(b *testing.B) {
-				payload := &compressedPayload{Algo: lzwAlgo, Buf: c.payload[:size]}
-				b.ResetTimer()
-				b.ReportAllocs()
-				for b.Loop() {
-					buf, err := encode(compressMsg, payload, false)
-					require.NoError(b, err)
-					_ = buf
 				}
 			})
 		}
@@ -655,8 +587,7 @@ func BenchmarkDecompressBuffer(b *testing.B) {
 					wrapped, err := compressPayload(algo, src, false)
 					require.NoError(b, err)
 					var compressed compressedPayload
-					require.NoError(b, decode(wrapped.Bytes()[1:], &compressed))
-					releaseEncodeBuffer(wrapped)
+					require.NoError(b, decode(wrapped[1:], &compressed))
 					b.ResetTimer()
 					b.ReportAllocs()
 					for b.Loop() {
@@ -671,9 +602,7 @@ func BenchmarkDecompressBuffer(b *testing.B) {
 }
 
 // BenchmarkMakeCompoundMessage measures the compound-message hot path,
-// which sits behind every gossip-piggyback send. The compound buffer is
-// released back to the encode pool every iteration, so the bench reflects
-// steady-state pool-warm cost.
+// which sits behind every gossip-piggyback send.
 func BenchmarkMakeCompoundMessage(b *testing.B) {
 	sizes := []int{64, 256, 1500}
 	counts := []int{1, 8, 64}
@@ -686,45 +615,16 @@ func BenchmarkMakeCompoundMessage(b *testing.B) {
 			b.Run(fmt.Sprintf("%d-msgs-of-%d", n, sz), func(b *testing.B) {
 				b.ReportAllocs()
 				for b.Loop() {
-					buf := makeCompoundMessage(msgs)
-					releaseEncodeBuffer(buf)
+					_ = makeCompoundMessage(msgs)
 				}
 			})
 		}
 	}
 }
 
-// BenchmarkMakeCompoundMessageColdPool measures the cold-buffer path: each
-// iteration drops the compound buffer instead of releasing it, so the next
-// Get hits encodeBufPool's New func and the bench reflects the staircase
-// of grow events the buffer would otherwise pay. The Grow(total) call
-// inside makeCompoundMessage collapses that staircase into one allocation;
-// this bench is what makes that visible.
-func BenchmarkMakeCompoundMessageColdPool(b *testing.B) {
-	sizes := []int{64, 256, 1500}
-	counts := []int{1, 8, 64}
-	for _, sz := range sizes {
-		for _, n := range counts {
-			msgs := make([][]byte, n)
-			for i := range msgs {
-				msgs[i] = randBytes(sz)
-			}
-			b.Run(fmt.Sprintf("%d-msgs-of-%d", n, sz), func(b *testing.B) {
-				b.ReportAllocs()
-				for b.Loop() {
-					buf := makeCompoundMessage(msgs)
-					_ = buf
-				}
-			})
-		}
-	}
-}
-
-// BenchmarkEncryptLocalState measures the TCP push-pull encryption path,
-// covering the new pushPullBufPool. Sized to span the small (single-node
-// gossip ack) through medium and large (push-pull-state) cases. The
-// encrypted buffer is released to the pool every iteration to reflect
-// steady-state pool-warm cost.
+// BenchmarkEncryptLocalState measures the TCP push-pull encryption
+// path. Sized to span the small (single-node gossip ack) through medium
+// and large (push-pull-state) cases.
 func BenchmarkEncryptLocalState(b *testing.B) {
 	keyring, err := NewKeyring(nil, TestKeys[0])
 	require.NoError(b, err)
@@ -735,10 +635,9 @@ func BenchmarkEncryptLocalState(b *testing.B) {
 
 	// Build a minimal Memberlist with the bits encryptLocalState needs;
 	// avoiding newMemberlist here keeps the bench setup independent of
-	// network transport availability. initCompressionMetricLabels is called so the
-	// bench remains valid if encryptLocalState (or the encryption path
-	// it sits on) ever gains metric instrumentation that reads the
-	// precomputed label slices.
+	// network transport availability. initCompressionMetricLabels is
+	// called so the bench remains valid if encryptLocalState ever gains
+	// metric instrumentation that reads the precomputed label slices.
 	m := &Memberlist{config: conf}
 	m.initCompressionMetricLabels()
 
@@ -748,9 +647,8 @@ func BenchmarkEncryptLocalState(b *testing.B) {
 		b.Run(fmt.Sprintf("%d", sz), func(b *testing.B) {
 			b.ReportAllocs()
 			for b.Loop() {
-				buf, err := m.encryptLocalState(sendBuf, "")
+				_, err := m.encryptLocalState(sendBuf, "")
 				require.NoError(b, err)
-				releasePushPullBuffer(buf)
 			}
 		})
 	}
@@ -767,8 +665,7 @@ func FuzzCompressDecompressRoundTrip(f *testing.F) {
 		for _, algo := range []compressionType{lzwAlgo, snappyAlgo} {
 			buf, err := compressPayload(algo, src, false)
 			require.NoError(t, err, fmt.Sprintf("compress %s: %v", algoLabel(algo), err))
-			gotAlgo, decoded, err := decompressPayload(buf.Bytes()[1:])
-			releaseEncodeBuffer(buf)
+			gotAlgo, decoded, err := decompressPayload(buf[1:])
 			require.NoError(t, err, fmt.Sprintf("decompress %s: %v", algoLabel(algo), err))
 			require.Equal(t, algo, gotAlgo)
 			require.True(t, bytes.Equal(decoded, src), fmt.Sprintf("payload mismatch (algo %s): got %q want %q",

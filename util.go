@@ -72,15 +72,6 @@ func releaseEncodeBuffer(b *bytes.Buffer) {
 	encodeBufPool.Put(b)
 }
 
-// releaseEncodeBuffers releases each buffer in bufs to the encode pool. A
-// helper rather than an inline loop so callers can `defer releaseEncodeBuffers(...)`
-// without paying the closure-literal heap allocation.
-func releaseEncodeBuffers(bufs []*bytes.Buffer) {
-	for _, b := range bufs {
-		releaseEncodeBuffer(b)
-	}
-}
-
 // pushPullBufPool recycles *bytes.Buffer values used on the TCP push-pull
 // path and other large-buffer call sites. Push-pull state can approach
 // maxPushStateBytes (20 MiB), which exceeds encodeBufPool's cap policy by a
@@ -130,32 +121,21 @@ func releasePushPullBuffer(b *bytes.Buffer) {
 	pushPullBufPool.Put(b)
 }
 
-// encode writes an encoded object to a buffer drawn from encodeBufPool.
-// On success the caller MUST releaseEncodeBuffer the returned buffer
-// once its bytes are no longer needed.
+// encode writes an encoded object and returns a freshly-allocated byte
+// slice owned by the caller.
 //
-// On error the returned buffer is nil; any pool buffer acquired
-// internally has already been released, so the caller does not need to
-// release on the error path.
-//
-// The input `in` is not retained by the returned buffer.
-func encode(msgType messageType, in any, msgpackUseNewTimeFormat bool) (*bytes.Buffer, error) {
+// The input `in` is not retained by the returned slice.
+func encode(msgType messageType, in any, msgpackUseNewTimeFormat bool) ([]byte, error) {
 	return encodeWithSizeHint(msgType, in, msgpackUseNewTimeFormat, 0)
 }
 
-// encodeWithSizeHint writes an encoded object to a buffer drawn from
-// encodeBufPool, pre-grown to sizeHint bytes when sizeHint > 0. Use it
-// from call sites that know the upcoming msgpack output size up front.
+// encodeWithSizeHint is like encode but pre-grows the internal working
+// buffer to sizeHint bytes when sizeHint > 0. Use it from call sites
+// that know the upcoming msgpack output size up front.
 // sizeHint == 0 makes it equivalent to encode().
-//
-// On success the caller MUST releaseEncodeBuffer the returned buffer
-// once its bytes are no longer needed. On error the returned buffer is
-// nil; any pool buffer acquired internally has already been released,
-// so the caller does not need to release on the error path.
-//
-// The input `in` is not retained by the returned buffer.
-func encodeWithSizeHint(msgType messageType, in any, msgpackUseNewTimeFormat bool, sizeHint int) (*bytes.Buffer, error) {
+func encodeWithSizeHint(msgType messageType, in any, msgpackUseNewTimeFormat bool, sizeHint int) ([]byte, error) {
 	buf := getEncodeBuffer()
+	defer releaseEncodeBuffer(buf)
 	if sizeHint > 0 {
 		buf.Grow(sizeHint)
 	}
@@ -163,12 +143,10 @@ func encodeWithSizeHint(msgType messageType, in any, msgpackUseNewTimeFormat boo
 	hd := codec.MsgpackHandle{}
 	hd.TimeNotBuiltin = !msgpackUseNewTimeFormat
 
-	enc := codec.NewEncoder(buf, &hd)
-	if err := enc.Encode(in); err != nil {
-		releaseEncodeBuffer(buf)
+	if err := codec.NewEncoder(buf, &hd).Encode(in); err != nil {
 		return nil, err
 	}
-	return buf, nil
+	return bytes.Clone(buf.Bytes()), nil
 }
 
 // Returns a random offset between 0 and n
@@ -293,17 +271,16 @@ OUTER:
 // them into one or multiple messages based on the limitations
 // of compound messages (255 messages each, 64KB max message size).
 //
-// The input msgs can be modified in-place. Each returned buffer is drawn
-// from encodeBufPool; the caller MUST releaseEncodeBuffer each one once
-// its bytes have been consumed.
-func makeCompoundMessages(msgs [][]byte) []*bytes.Buffer {
+// The input msgs can be modified in-place. Each returned slice is a
+// freshly-allocated copy owned by the caller.
+func makeCompoundMessages(msgs [][]byte) [][]byte {
 	const (
 		maxMsgs      = math.MaxUint8
 		maxMsgLength = math.MaxUint16
 	)
 
 	// Optimistically assume there will be no big message.
-	bufs := make([]*bytes.Buffer, 0, (len(msgs)+(maxMsgs-1))/maxMsgs)
+	out := make([][]byte, 0, (len(msgs)+(maxMsgs-1))/maxMsgs)
 
 	// Do not add to a compound message any message bigger than the max message length
 	// we can store.
@@ -317,38 +294,31 @@ func makeCompoundMessages(msgs [][]byte) []*bytes.Buffer {
 			continue
 		}
 
-		// This message is a large one, so we send it alone. Copy into a
-		// pool buffer (rather than the previous bytes.NewBuffer(msgs[r])
-		// alias) so every entry in bufs shares a single ownership model
-		// and the caller can `releaseEncodeBuffers(bufs)` uniformly.
-		// Pooling the alias would put a buffer that wraps caller-owned
-		// memory into the pool, and the next pool consumer's writes
-		// would corrupt the original — the copy is the correctness
-		// price of the uniform release.
-		buf := getEncodeBuffer()
-		buf.Write(msgs[r])
-		bufs = append(bufs, buf)
+		// Oversized message — send it alone. Copy so the caller owns
+		// the returned slice independently of the input it passed in.
+		cp := append([]byte(nil), msgs[r]...)
+		out = append(out, cp)
 		r++
 	}
 	msgs = msgs[:w]
 
 	// Group remaining messages in compound message(s).
 	for ; len(msgs) > maxMsgs; msgs = msgs[maxMsgs:] {
-		bufs = append(bufs, makeCompoundMessage(msgs[:maxMsgs]))
+		out = append(out, makeCompoundMessage(msgs[:maxMsgs]))
 	}
 	if len(msgs) > 0 {
-		bufs = append(bufs, makeCompoundMessage(msgs))
+		out = append(out, makeCompoundMessage(msgs))
 	}
 
-	return bufs
+	return out
 }
 
 // makeCompoundMessage takes a list of messages and generates a single
-// compound message containing all of them. The returned buffer is drawn
-// from encodeBufPool; the caller MUST releaseEncodeBuffer it once the
-// bytes have been consumed.
-func makeCompoundMessage(msgs [][]byte) *bytes.Buffer {
+// compound message containing all of them. Returns a freshly-allocated
+// byte slice owned by the caller.
+func makeCompoundMessage(msgs [][]byte) []byte {
 	buf := getEncodeBuffer()
+	defer releaseEncodeBuffer(buf)
 
 	// Pre-size the buffer to the exact compound length (1 type byte +
 	// 1 count byte + 2 bytes per length prefix + the message bodies).
@@ -374,7 +344,7 @@ func makeCompoundMessage(msgs [][]byte) *bytes.Buffer {
 		buf.Write(m)
 	}
 
-	return buf
+	return bytes.Clone(buf.Bytes())
 }
 
 // decodeCompoundMessage splits a compound message and returns

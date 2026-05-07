@@ -55,17 +55,13 @@ func TestHandleCompoundPing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected err %s", err)
 	}
-	defer releaseEncodeBuffer(buf)
 
 	// Make a compound message
-	compound := makeCompoundMessage([][]byte{buf.Bytes(), buf.Bytes(), buf.Bytes()})
-	t.Cleanup(func() {
-		releaseEncodeBuffer(compound)
-	})
+	compound := makeCompoundMessage([][]byte{buf, buf, buf})
 
 	// Send compound version
 	addr := &net.UDPAddr{IP: net.ParseIP(m.config.BindAddr), Port: m.config.BindPort}
-	_, err = udp.WriteTo(compound.Bytes(), addr)
+	_, err = udp.WriteTo(compound, addr)
 	if err != nil {
 		t.Fatalf("unexpected err %s", err)
 	}
@@ -136,11 +132,10 @@ func TestHandlePing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected err %s", err)
 	}
-	defer releaseEncodeBuffer(buf)
 
 	// Send
 	addr := &net.UDPAddr{IP: net.ParseIP(m.config.BindAddr), Port: m.config.BindPort}
-	_, err = udp.WriteTo(buf.Bytes(), addr)
+	_, err = udp.WriteTo(buf, addr)
 	if err != nil {
 		t.Fatalf("unexpected err %s", err)
 	}
@@ -210,11 +205,10 @@ func TestHandlePing_WrongNode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected err %s", err)
 	}
-	defer releaseEncodeBuffer(buf)
 
 	// Send
 	addr := &net.UDPAddr{IP: net.ParseIP(m.config.BindAddr), Port: m.config.BindPort}
-	_, err = udp.WriteTo(buf.Bytes(), addr)
+	_, err = udp.WriteTo(buf, addr)
 	if err != nil {
 		t.Fatalf("unexpected err %s", err)
 	}
@@ -263,11 +257,10 @@ func TestHandleIndirectPing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected err %s", err)
 	}
-	defer releaseEncodeBuffer(buf)
 
 	// Send
 	addr := &net.UDPAddr{IP: net.ParseIP(m.config.BindAddr), Port: m.config.BindPort}
-	_, err = udp.WriteTo(buf.Bytes(), addr)
+	_, err = udp.WriteTo(buf, addr)
 	if err != nil {
 		t.Fatalf("unexpected err %s", err)
 	}
@@ -383,9 +376,8 @@ func TestTCPPing(t *testing.T) {
 			pingErrCh <- fmt.Errorf("failed to encode ack: %s", err)
 			return
 		}
-		defer releaseEncodeBuffer(out)
 
-		err = m.rawSendMsgStream(conn, out.Bytes(), "")
+		err = m.rawSendMsgStream(conn, out, "")
 		if err != nil {
 			pingErrCh <- fmt.Errorf("failed to send ack: %s", err)
 			return
@@ -434,9 +426,8 @@ func TestTCPPing(t *testing.T) {
 			pingErrCh <- fmt.Errorf("failed to encode ack: %s", err)
 			return
 		}
-		defer releaseEncodeBuffer(out)
 
-		err = m.rawSendMsgStream(conn, out.Bytes(), "")
+		err = m.rawSendMsgStream(conn, out, "")
 		if err != nil {
 			pingErrCh <- fmt.Errorf("failed to send ack: %s", err)
 			return
@@ -479,9 +470,8 @@ func TestTCPPing(t *testing.T) {
 			pingErrCh <- fmt.Errorf("failed to encode bogus msg: %s", err)
 			return
 		}
-		defer releaseEncodeBuffer(out)
 
-		err = m.rawSendMsgStream(conn, out.Bytes(), "")
+		err = m.rawSendMsgStream(conn, out, "")
 		if err != nil {
 			pingErrCh <- fmt.Errorf("failed to send bogus msg: %s", err)
 			return
@@ -694,11 +684,10 @@ func TestSendMsg_Piggyback(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected err %s", err)
 	}
-	defer releaseEncodeBuffer(buf)
 
 	// Send
 	addr := &net.UDPAddr{IP: net.ParseIP(m.config.BindAddr), Port: m.config.BindPort}
-	_, err = udp.WriteTo(buf.Bytes(), addr)
+	_, err = udp.WriteTo(buf, addr)
 	if err != nil {
 		t.Fatalf("unexpected err %s", err)
 	}
@@ -780,10 +769,9 @@ func TestEncryptDecryptState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
-	defer releasePushPullBuffer(crypt)
 
 	// Create reader, seek past the type byte
-	buf := bytes.NewReader(crypt.Bytes())
+	buf := bytes.NewReader(crypt)
 	if _, err := buf.Seek(1, 0); err != nil {
 		t.Fatalf("err: %v", err)
 	}
