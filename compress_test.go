@@ -358,6 +358,54 @@ func TestDecompressErrors(t *testing.T) {
 	})
 }
 
+// TestCompressPayload_UnknownAlgo locks down the send-side dispatch's
+// default arm: compressPayload returns a clear error rather than panicking
+// or returning a partially-formed buffer when handed an unrecognized algo.
+// Symmetric to TestDecompressErrors/UnknownAlgorithm on the receive side.
+func TestCompressPayload_UnknownAlgo(t *testing.T) {
+	buf, err := compressPayload(unknownAlgo, []byte("data"), false)
+	require.EqualError(t, err, "memberlist: cannot compress with unknown algorithm 255")
+	require.Nil(t, buf)
+}
+
+// TestDecompressBuffer_MalformedBody covers garbage and truncated inputs
+// for both algorithms. ExceedsCap covers the claimed-length bomb path;
+// this covers the body-corruption path. We don't pin exact error messages
+// (the compress/lzw and snappy libraries can change them) but we do pin
+// the wrapper-origin substring so a regression that loses the wrap or
+// the per-algorithm dispatch is caught.
+func TestDecompressBuffer_MalformedBody(t *testing.T) {
+	for _, tc := range []struct {
+		algo        compressionType
+		errContains string
+	}{
+		{lzwAlgo, "lzwDecompress"},
+		{snappyAlgo, "snappy"},
+	} {
+		t.Run(algoLabel(tc.algo), func(t *testing.T) {
+			t.Run("garbage", func(t *testing.T) {
+				garbage := bytes.Repeat([]byte{0xff}, 32)
+				_, err := decompressBuffer(&compressedPayload{Algo: tc.algo, Buf: garbage})
+				require.ErrorContains(t, err, tc.errContains)
+			})
+
+			t.Run("truncated", func(t *testing.T) {
+				input := bytes.Repeat([]byte("the quick brown fox "), 100)
+				wrapped, err := compressPayload(tc.algo, input, false)
+				require.NoError(t, err)
+				var c compressedPayload
+				require.NoError(t, decode(wrapped.Bytes()[1:], &c))
+				releaseEncodeBuffer(wrapped)
+
+				// Copy out before truncating; c.Buf may alias pool memory.
+				truncated := append([]byte(nil), c.Buf[:len(c.Buf)/2]...)
+				_, err = decompressBuffer(&compressedPayload{Algo: tc.algo, Buf: truncated})
+				require.ErrorContains(t, err, tc.errContains)
+			})
+		})
+	}
+}
+
 // TestEncodeRoundTrip verifies repeated encode/decode calls each produce
 // independently correct bytes. encode() doesn't pool its output buffer
 // (see comment in util.go), so this guards basic correctness across calls.

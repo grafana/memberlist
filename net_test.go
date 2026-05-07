@@ -863,6 +863,54 @@ func TestRawSendUdp_CRC(t *testing.T) {
 	}
 }
 
+// TestRawSendMsgPacket_CompressErrorFallsBackToPlaintext locks down the
+// fallback semantics in rawSendMsgPacket: when compressPayload returns
+// an error, the original plaintext is sent unchanged so peers can still
+// decode it. Production code never reaches this state in practice
+// (resolveCompressionAlgorithm catches invalid configs at construction);
+// this test pins the fallback shape against future bugs that might
+// introduce such a state.
+func TestRawSendMsgPacket_CompressErrorFallsBackToPlaintext(t *testing.T) {
+	mockNet := &MockNetwork{}
+	senderT := mockNet.NewTransport("sender")
+	receiverT := mockNet.NewTransport("receiver")
+
+	conf := DefaultLANConfig()
+	conf.EnableCompression = true
+
+	// Build a minimal Memberlist with just the bits rawSendMsgPacket
+	// needs. Skipping Create avoids spawning the gossip/listen goroutines
+	// that read m.compressionAlgo concurrently — production treats that
+	// field as set-once-at-construction, so mutating it post-Create
+	// would race even if the race detector hasn't caught it under the
+	// quiet test workload.
+	m := &Memberlist{
+		config:    conf,
+		transport: senderT,
+		logger:    log.New(io.Discard, "", 0),
+		nodeMap:   make(map[string]*NodeState),
+	}
+	m.initMetricLabels()
+	m.compressionAlgo = compressionType(99)
+
+	payload := []byte{0x01, 0x02, 0x03, 0x04, 0x05}
+	a := Address{Addr: receiverT.addr.String(), Name: "receiver"}
+
+	// MockTransport.WriteToAddress sends on an unbuffered packetCh, so
+	// run the send on a goroutine and receive in the main test goroutine
+	// to avoid deadlock.
+	sendErr := make(chan error, 1)
+	go func() { sendErr <- m.rawSendMsgPacket(a, &Node{}, payload) }()
+
+	select {
+	case pkt := <-receiverT.PacketCh():
+		require.Equal(t, payload, pkt.Buf, "packet must be plaintext fallback")
+		require.NoError(t, <-sendErr)
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for packet")
+	}
+}
+
 func TestIngestPacket_CRC(t *testing.T) {
 	m := GetMemberlist(t, func(c *Config) {
 		c.EnableCompression = false
