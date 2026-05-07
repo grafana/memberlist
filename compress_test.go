@@ -509,6 +509,33 @@ func BenchmarkCompressPayload(b *testing.B) {
 	}
 }
 
+// BenchmarkCompressPayloadColdPool exercises the cold-buffer path for
+// compressPayload: each iteration drops the returned encode buffer
+// instead of releasing it, so the next call hits encodeBufPool's New
+// func and pays the staircase of grow events the buffer would otherwise
+// incur. BenchmarkCompressPayload is steady-state; this bench is what
+// makes a size-hint optimization on encode() measurable.
+func BenchmarkCompressPayloadColdPool(b *testing.B) {
+	sizes := []int{64, 256, 1500, 16 * 1024}
+	assertBenchSizes(b, sizes)
+	for _, c := range benchCorpora() {
+		for _, algo := range []compressionType{lzwAlgo, snappyAlgo} {
+			for _, size := range sizes {
+				b.Run(fmt.Sprintf("%s/%s/%d", c.name, algoLabel(algo), size), func(b *testing.B) {
+					src := c.payload[:size]
+					b.ResetTimer()
+					b.ReportAllocs()
+					for b.Loop() {
+						buf, err := compressPayload(algo, src, false)
+						require.NoError(b, err)
+						_ = buf
+					}
+				})
+			}
+		}
+	}
+}
+
 // BenchmarkEncode isolates the encode() path (msgpack only, no
 // compression) so the encode-buffer pool's effect is directly observable.
 func BenchmarkEncode(b *testing.B) {
@@ -524,6 +551,30 @@ func BenchmarkEncode(b *testing.B) {
 					buf, err := encode(compressMsg, payload, false)
 					require.NoError(b, err)
 					releaseEncodeBuffer(buf)
+				}
+			})
+		}
+	}
+}
+
+// BenchmarkEncodeColdPool exercises the cold-buffer path: each iteration
+// drops the encoded buffer on the floor instead of releasing it back, so
+// the next Get hits encodeBufPool's New func and pays the first-write
+// growth cost. BenchmarkEncode is steady-state (pool-warm) and won't move
+// when the pool's initial capacity changes; this bench will.
+func BenchmarkEncodeColdPool(b *testing.B) {
+	sizes := []int{64, 256, 1500, 16 * 1024}
+	assertBenchSizes(b, sizes)
+	for _, c := range benchCorpora() {
+		for _, size := range sizes {
+			b.Run(fmt.Sprintf("%s/%d", c.name, size), func(b *testing.B) {
+				payload := &compressedPayload{Algo: lzwAlgo, Buf: c.payload[:size]}
+				b.ResetTimer()
+				b.ReportAllocs()
+				for b.Loop() {
+					buf, err := encode(compressMsg, payload, false)
+					require.NoError(b, err)
+					_ = buf
 				}
 			})
 		}
@@ -576,6 +627,32 @@ func BenchmarkMakeCompoundMessage(b *testing.B) {
 				for b.Loop() {
 					buf := makeCompoundMessage(msgs)
 					releaseEncodeBuffer(buf)
+				}
+			})
+		}
+	}
+}
+
+// BenchmarkMakeCompoundMessageColdPool measures the cold-buffer path: each
+// iteration drops the compound buffer instead of releasing it, so the next
+// Get hits encodeBufPool's New func and the bench reflects the staircase
+// of grow events the buffer would otherwise pay. The Grow(total) call
+// inside makeCompoundMessage collapses that staircase into one allocation;
+// this bench is what makes that visible.
+func BenchmarkMakeCompoundMessageColdPool(b *testing.B) {
+	sizes := []int{64, 256, 1500}
+	counts := []int{1, 8, 64}
+	for _, sz := range sizes {
+		for _, n := range counts {
+			msgs := make([][]byte, n)
+			for i := range msgs {
+				msgs[i] = randBytes(sz)
+			}
+			b.Run(fmt.Sprintf("%d-msgs-of-%d", n, sz), func(b *testing.B) {
+				b.ReportAllocs()
+				for b.Loop() {
+					buf := makeCompoundMessage(msgs)
+					_ = buf
 				}
 			})
 		}

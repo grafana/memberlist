@@ -139,8 +139,18 @@ func releasePushPullBuffer(b *bytes.Buffer) {
 // release on the error path.
 //
 // The input `in` is not retained by the returned buffer.
-func encode(msgType messageType, in interface{}, msgpackUseNewTimeFormat bool) (*bytes.Buffer, error) {
+func encode(msgType messageType, in any, msgpackUseNewTimeFormat bool) (*bytes.Buffer, error) {
+	return encodeWithSizeHint(msgType, in, msgpackUseNewTimeFormat, 0)
+}
+
+// encodeWithSizeHint is like encode but pre-grows the destination buffer
+// to sizeHint bytes when sizeHint > 0. Use it from call sites that know
+// the upcoming msgpack output size up front. sizeHint == 0 is a no-op.
+func encodeWithSizeHint(msgType messageType, in any, msgpackUseNewTimeFormat bool, sizeHint int) (*bytes.Buffer, error) {
 	buf := getEncodeBuffer()
+	if sizeHint > 0 {
+		buf.Grow(sizeHint)
+	}
 	buf.WriteByte(uint8(msgType))
 	hd := codec.MsgpackHandle{}
 	hd.TimeNotBuiltin = !msgpackUseNewTimeFormat
@@ -331,6 +341,14 @@ func makeCompoundMessages(msgs [][]byte) []*bytes.Buffer {
 // bytes have been consumed.
 func makeCompoundMessage(msgs [][]byte) *bytes.Buffer {
 	buf := getEncodeBuffer()
+
+	// Pre-size the buffer to the exact compound length (1 type byte +
+	// 1 count byte + 2 bytes per length prefix + the message bodies).
+	total := 2 + 2*len(msgs)
+	for _, m := range msgs {
+		total += len(m)
+	}
+	buf.Grow(total)
 
 	// Write out the type
 	buf.WriteByte(uint8(compoundMsg))

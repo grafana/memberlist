@@ -88,7 +88,10 @@ func compressPayload(algo compressionType, inp []byte, msgpackUseNewTimeFormat b
 		return nil, fmt.Errorf("memberlist: cannot compress with unknown algorithm %d", algo)
 	}
 
-	return encode(compressMsg, &compressedPayload{Algo: algo, Buf: encoded}, msgpackUseNewTimeFormat)
+	// Encoded compressedPayload size is len(encoded) plus a small,
+	// bounded msgpack overhead for the 2-field struct header (algo +
+	// length-prefixed Buf). 16 B headroom covers it.
+	return encodeWithSizeHint(compressMsg, &compressedPayload{Algo: algo, Buf: encoded}, msgpackUseNewTimeFormat, len(encoded)+16)
 }
 
 // decompressPayload unpacks an encoded compressedPayload and returns the
