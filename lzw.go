@@ -26,11 +26,7 @@ const (
 // lzwScratchBufferPool recycles *bytes.Buffer values used as LZW-scratch space
 // inside lzwCompress. The buffer is acquired and released within a single
 // compressPayload call; it never escapes to the network or is held across
-// goroutines, so it is safe to pool here even though the encode() output
-// buffer is not (see encode).
-//
-// Tuning is for LZW scratch sizes only — do NOT reuse this pool for other
-// callers without revisiting maxPooledLZWScratchCap.
+// goroutines, so it is safe to pool here.
 var lzwScratchBufferPool = sync.Pool{
 	New: func() any {
 		return new(bytes.Buffer)
@@ -86,7 +82,7 @@ var lzwReaderPool = sync.Pool{
 	},
 }
 
-// lzwCompress compresses src using lzw and returns the pooled scratch
+// lzwCompress lzw compresses src and returns the pooled scratch
 // buffer holding the encoded bytes. The caller MUST releaseLZWScratch the
 // returned buffer once the bytes are no longer needed.
 func lzwCompress(src []byte) (*bytes.Buffer, error) {

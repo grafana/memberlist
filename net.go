@@ -852,8 +852,6 @@ func (m *Memberlist) rawSendMsgPacket(a Address, node *Node, msg []byte) error {
 			m.compressMetricLabels)
 		buf, err := compressPayload(m.compressionAlgo, msg, m.config.MsgpackUseNewTimeFormat)
 		if err != nil {
-			// Compression failed — fall back to plaintext to avoid paying
-			// encryption + network cost on a payload we couldn't shrink.
 			metrics.IncrCounterWithLabels(metricCompressErrors, 1,
 				m.compressMetricLabels)
 			m.logger.Printf("[WARN] memberlist: Failed to compress payload: %v", err)
@@ -929,7 +927,6 @@ func (m *Memberlist) rawSendMsgStream(conn net.Conn, sendBuf []byte, streamLabel
 			m.compressMetricLabels)
 		compBuf, err := compressPayload(m.compressionAlgo, sendBuf, m.config.MsgpackUseNewTimeFormat)
 		if err != nil {
-			// Compression failed — fall back to plaintext.
 			metrics.IncrCounterWithLabels(metricCompressErrors, 1,
 				m.compressMetricLabels)
 			m.logger.Printf("[ERROR] memberlist: Failed to compress payload: %v", err)

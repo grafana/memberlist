@@ -104,10 +104,7 @@ type Memberlist struct {
 	compressSkippedSizeWorseLabels []metrics.Label
 
 	// decompressLZWLabels and decompressSnappyLabels are metricLabels +
-	// an "algo" label set to the corresponding algorithm name. The
-	// receive path reads the algorithm from each incoming
-	// compressedPayload and dispatches via decompressLabels. unknownAlgo
-	// is handled inline by decompressLabels' default arm.
+	// an "algo" label set to the corresponding algorithm name.
 	decompressLZWLabels    []metrics.Label
 	decompressSnappyLabels []metrics.Label
 }

@@ -50,9 +50,7 @@ func snappyCompress(src []byte) *[]byte {
 }
 
 // snappyDecompress returns a freshly allocated []byte holding the
-// decompressed payload. snappy.Decode writes into the right-sized dst we
-// allocate here; pooling the dst would force a copy-out (the caller retains
-// the slice indefinitely) and add net overhead, so we don't.
+// decompressed payload.
 //
 // The claimed decoded length is checked against maxDecompressBytes before
 // allocation so a malformed peer cannot trigger an oversized make().
@@ -64,5 +62,7 @@ func snappyDecompress(src []byte) ([]byte, error) {
 	if n > maxDecompressBytes {
 		return nil, fmt.Errorf("memberlist: snappy-decompressed payload would exceed %d bytes (claimed %d)", maxDecompressBytes, n)
 	}
+	// Pooling the buffer would force a copy-out (the caller retains
+	// the slice indefinitely) and add net overhead.
 	return snappy.Decode(make([]byte, n), src)
 }
