@@ -55,9 +55,13 @@ func TestHandleCompoundPing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected err %s", err)
 	}
+	defer releaseEncodeBuffer(buf)
 
 	// Make a compound message
 	compound := makeCompoundMessage([][]byte{buf.Bytes(), buf.Bytes(), buf.Bytes()})
+	t.Cleanup(func() {
+		releaseEncodeBuffer(compound)
+	})
 
 	// Send compound version
 	addr := &net.UDPAddr{IP: net.ParseIP(m.config.BindAddr), Port: m.config.BindPort}
@@ -132,6 +136,7 @@ func TestHandlePing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected err %s", err)
 	}
+	defer releaseEncodeBuffer(buf)
 
 	// Send
 	addr := &net.UDPAddr{IP: net.ParseIP(m.config.BindAddr), Port: m.config.BindPort}
@@ -205,6 +210,7 @@ func TestHandlePing_WrongNode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected err %s", err)
 	}
+	defer releaseEncodeBuffer(buf)
 
 	// Send
 	addr := &net.UDPAddr{IP: net.ParseIP(m.config.BindAddr), Port: m.config.BindPort}
@@ -257,6 +263,7 @@ func TestHandleIndirectPing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected err %s", err)
 	}
+	defer releaseEncodeBuffer(buf)
 
 	// Send
 	addr := &net.UDPAddr{IP: net.ParseIP(m.config.BindAddr), Port: m.config.BindPort}
@@ -376,6 +383,7 @@ func TestTCPPing(t *testing.T) {
 			pingErrCh <- fmt.Errorf("failed to encode ack: %s", err)
 			return
 		}
+		defer releaseEncodeBuffer(out)
 
 		err = m.rawSendMsgStream(conn, out.Bytes(), "")
 		if err != nil {
@@ -426,6 +434,7 @@ func TestTCPPing(t *testing.T) {
 			pingErrCh <- fmt.Errorf("failed to encode ack: %s", err)
 			return
 		}
+		defer releaseEncodeBuffer(out)
 
 		err = m.rawSendMsgStream(conn, out.Bytes(), "")
 		if err != nil {
@@ -470,6 +479,7 @@ func TestTCPPing(t *testing.T) {
 			pingErrCh <- fmt.Errorf("failed to encode bogus msg: %s", err)
 			return
 		}
+		defer releaseEncodeBuffer(out)
 
 		err = m.rawSendMsgStream(conn, out.Bytes(), "")
 		if err != nil {
@@ -684,6 +694,7 @@ func TestSendMsg_Piggyback(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected err %s", err)
 	}
+	defer releaseEncodeBuffer(buf)
 
 	// Send
 	addr := &net.UDPAddr{IP: net.ParseIP(m.config.BindAddr), Port: m.config.BindPort}

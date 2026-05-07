@@ -4,6 +4,7 @@
 package memberlist
 
 import (
+	"bytes"
 	"fmt"
 	"reflect"
 	"testing"
@@ -47,6 +48,7 @@ func TestEncodeDecode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected err: %s", err)
 	}
+	defer releaseEncodeBuffer(buf)
 	var out ping
 	if err := decode(buf.Bytes()[1:], &out); err != nil {
 		t.Fatalf("unexpected err: %s", err)
@@ -432,9 +434,11 @@ func TestMakeCompoundMessage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected err: %s", err)
 	}
+	defer releaseEncodeBuffer(buf)
 
 	msgs := [][]byte{buf.Bytes(), buf.Bytes(), buf.Bytes()}
 	compound := makeCompoundMessage(msgs)
+	defer releaseEncodeBuffer(compound)
 
 	if compound.Len() != 3*buf.Len()+3*compoundOverhead+compoundHeaderOverhead {
 		t.Fatalf("bad len")
@@ -447,9 +451,11 @@ func TestDecodeCompoundMessage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected err: %s", err)
 	}
+	defer releaseEncodeBuffer(buf)
 
 	msgs := [][]byte{buf.Bytes(), buf.Bytes(), buf.Bytes()}
 	compound := makeCompoundMessage(msgs)
+	defer releaseEncodeBuffer(compound)
 
 	trunc, parts, err := decodeCompoundMessage(compound.Bytes()[1:])
 	if err != nil {
@@ -481,9 +487,11 @@ func TestDecodeCompoundMessage_Trunc(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected err: %s", err)
 	}
+	defer releaseEncodeBuffer(buf)
 
 	msgs := [][]byte{buf.Bytes(), buf.Bytes(), buf.Bytes()}
 	compound := makeCompoundMessage(msgs)
+	defer releaseEncodeBuffer(compound)
 
 	trunc, parts, err := decodeCompoundMessage(compound.Bytes()[1:38])
 	if err != nil {
@@ -518,12 +526,28 @@ func TestMakeCompoundMessages(t *testing.T) {
 		bigMsgPayloadLength   = 70000
 	)
 
+	var encodeBufs []*bytes.Buffer
+	t.Cleanup(func() {
+		releaseEncodeBuffers(encodeBufs)
+	})
+
+	// makeCompound wraps makeCompoundMessage so the returned buffer is
+	// tracked for cleanup. Inline `makeCompoundMessage(s).Bytes()` would
+	// leak the buffer because the *bytes.Buffer goes out of scope as
+	// the expression completes.
+	makeCompound := func(msgs [][]byte) []byte {
+		buf := makeCompoundMessage(msgs)
+		encodeBufs = append(encodeBufs, buf)
+		return buf.Bytes()
+	}
+
 	// Generate some fixtures.
 	smallMessages := make([][]byte, 300)
 	for i := 0; i < len(smallMessages); i++ {
 		msg := &ackResp{SeqNo: smallMsgSeqNo, Payload: []byte{byte(i)}}
 		encoded, err := encode(ackRespMsg, msg, false)
 		require.NoError(t, err)
+		encodeBufs = append(encodeBufs, encoded)
 
 		smallMessages[i] = encoded.Bytes()
 	}
@@ -536,6 +560,7 @@ func TestMakeCompoundMessages(t *testing.T) {
 		msg := &ackResp{SeqNo: bigMsgSeqNo, Payload: payload}
 		encoded, err := encode(ackRespMsg, msg, false)
 		require.NoError(t, err)
+		encodeBufs = append(encodeBufs, encoded)
 
 		bigMessages[i] = encoded.Bytes()
 	}
@@ -550,17 +575,17 @@ func TestMakeCompoundMessages(t *testing.T) {
 		},
 		"one small message": {
 			input:    smallMessages[0:1],
-			expected: [][]byte{makeCompoundMessage(smallMessages[0:1]).Bytes()},
+			expected: [][]byte{makeCompound(smallMessages[0:1])},
 		},
 		"few small messages": {
 			input:    smallMessages[0:3],
-			expected: [][]byte{makeCompoundMessage(smallMessages[0:3]).Bytes()},
+			expected: [][]byte{makeCompound(smallMessages[0:3])},
 		},
 		"many small messages (more than 255)": {
 			input: smallMessages[0:300],
 			expected: [][]byte{
-				makeCompoundMessage(smallMessages[0:255]).Bytes(),
-				makeCompoundMessage(smallMessages[255:300]).Bytes(),
+				makeCompound(smallMessages[0:255]),
+				makeCompound(smallMessages[255:300]),
 			},
 		},
 		"one big message": {
@@ -588,8 +613,8 @@ func TestMakeCompoundMessages(t *testing.T) {
 				bigMessages[0],
 				bigMessages[1],
 				bigMessages[2],
-				makeCompoundMessage(smallMessages[0:255]).Bytes(),
-				makeCompoundMessage(smallMessages[255:300]).Bytes(),
+				makeCompound(smallMessages[0:255]),
+				makeCompound(smallMessages[255:300]),
 			},
 		},
 	}
@@ -597,6 +622,7 @@ func TestMakeCompoundMessages(t *testing.T) {
 	for testName, testData := range tests {
 		t.Run(testName, func(t *testing.T) {
 			actual := makeCompoundMessages(testData.input)
+			defer releaseEncodeBuffers(actual)
 
 			// Get the actual []byte of each message.
 			actualBytes := make([][]byte, 0, len(actual))

@@ -53,6 +53,7 @@ func TestCompressDecompress(t *testing.T) {
 					input := randBytes(size)
 					buf, err := compressPayload(algo, input, false)
 					require.NoError(t, err)
+					defer releaseEncodeBuffer(buf)
 
 					gotAlgo, decoded, err := decompressPayload(buf.Bytes()[1:])
 					require.NoError(t, err)
@@ -72,6 +73,7 @@ func TestCompressDecompress(t *testing.T) {
 				input := []byte("the quick brown fox jumps over the lazy dog")
 				buf, err := compressPayload(senderAlgo, input, false)
 				require.NoError(t, err)
+				defer releaseEncodeBuffer(buf)
 
 				// The receiver dispatches off the on-wire algo tag, never off
 				// any local config — exercise both code paths via decompressPayload.
@@ -101,6 +103,7 @@ func TestCompressDecompress(t *testing.T) {
 						return
 					}
 					gotAlgo, decoded, err := decompressPayload(buf.Bytes()[1:])
+					releaseEncodeBuffer(buf)
 					if !assert.NoError(t, err) {
 						return
 					}
@@ -128,12 +131,14 @@ func TestCompressDecompress(t *testing.T) {
 
 				bufLong, err := compressPayload(algo, long, false)
 				require.NoError(t, err)
+				defer releaseEncodeBuffer(bufLong)
 				_, decLong, err := decompressPayload(bufLong.Bytes()[1:])
 				require.NoError(t, err)
 				require.Equal(t, long, decLong)
 
 				bufShort, err := compressPayload(algo, short, false)
 				require.NoError(t, err)
+				defer releaseEncodeBuffer(bufShort)
 				_, decShort, err := decompressPayload(bufShort.Bytes()[1:])
 				require.NoError(t, err)
 				require.Equal(t, short, decShort)
@@ -151,6 +156,7 @@ func TestCompressDecompress(t *testing.T) {
 				input := bytes.Repeat([]byte("xy"), 512)
 				buf, err := compressPayload(algo, input, false)
 				require.NoError(t, err)
+				defer releaseEncodeBuffer(buf)
 				snapshot := append([]byte(nil), buf.Bytes()...)
 
 				// Force pool churn: do another encode of different bytes,
@@ -158,8 +164,9 @@ func TestCompressDecompress(t *testing.T) {
 				// retained any reference into pooled scratch, the snapshot
 				// would diverge from the live buffer.
 				for range 5 {
-					_, err := compressPayload(algo, []byte(strings.Repeat("z", 1024)), false)
+					other, err := compressPayload(algo, []byte(strings.Repeat("z", 1024)), false)
 					require.NoError(t, err)
+					releaseEncodeBuffer(other)
 				}
 
 				require.Equal(t, snapshot, buf.Bytes())
@@ -195,8 +202,8 @@ func TestReleaseEncodeBuffer_BoundedCap(t *testing.T) {
 	big := getEncodeBuffer()
 	big.Write(make([]byte, maxPooledEncodeBufCap+1))
 	require.Greater(t, big.Cap(), maxPooledEncodeBufCap)
-
 	releaseEncodeBuffer(big)
+
 	for i := range 10 {
 		b := getEncodeBuffer()
 		require.LessOrEqual(t, b.Cap(), maxPooledEncodeBufCap,
@@ -411,10 +418,15 @@ func TestDecompressBuffer_MalformedBody(t *testing.T) {
 // (see comment in util.go), so this guards basic correctness across calls.
 func TestEncodeRoundTrip(t *testing.T) {
 	const inputs = 32
+	var encodeBufs []*bytes.Buffer
+	t.Cleanup(func() {
+		releaseEncodeBuffers(encodeBufs)
+	})
 	for i := range inputs {
 		buf, err := encode(pingMsg, &ping{SeqNo: uint32(i), Node: "n"}, false)
 		require.NoError(t, err)
 		require.Greater(t, buf.Len(), 0)
+		encodeBufs = append(encodeBufs, buf)
 
 		var p ping
 		require.NoError(t, decode(buf.Bytes()[1:], &p))
@@ -644,6 +656,7 @@ func BenchmarkDecompressBuffer(b *testing.B) {
 					require.NoError(b, err)
 					var compressed compressedPayload
 					require.NoError(b, decode(wrapped.Bytes()[1:], &compressed))
+					releaseEncodeBuffer(wrapped)
 					b.ResetTimer()
 					b.ReportAllocs()
 					for b.Loop() {
@@ -755,6 +768,7 @@ func FuzzCompressDecompressRoundTrip(f *testing.F) {
 			buf, err := compressPayload(algo, src, false)
 			require.NoError(t, err, fmt.Sprintf("compress %s: %v", algoLabel(algo), err))
 			gotAlgo, decoded, err := decompressPayload(buf.Bytes()[1:])
+			releaseEncodeBuffer(buf)
 			require.NoError(t, err, fmt.Sprintf("decompress %s: %v", algoLabel(algo), err))
 			require.Equal(t, algo, gotAlgo)
 			require.True(t, bytes.Equal(decoded, src), fmt.Sprintf("payload mismatch (algo %s): got %q want %q",
