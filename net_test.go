@@ -901,7 +901,7 @@ func TestRawSendMsgPacket_CompressErrorFallsBackToPlaintext(t *testing.T) {
 		logger:    log.New(io.Discard, "", 0),
 		nodeMap:   make(map[string]*NodeState),
 	}
-	m.initMetricLabels()
+	m.initCompressionMetricLabels()
 	m.compressionAlgo = compressionType(99)
 
 	payload := []byte{0x01, 0x02, 0x03, 0x04, 0x05}

@@ -251,7 +251,7 @@ func newMemberlist(conf *Config) (*Memberlist, error) {
 		metricLabels:         conf.MetricLabels,
 		compressionAlgo:      algo,
 	}
-	m.initMetricLabels()
+	m.initCompressionMetricLabels()
 	m.broadcasts.NumNodes = func() int {
 		return m.estNumNodes()
 	}

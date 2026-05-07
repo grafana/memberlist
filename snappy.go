@@ -32,7 +32,7 @@ var snappyEncodeBufPool = sync.Pool{
 	},
 }
 
-func putSnappyEncodeBuf(p *[]byte) {
+func releaseSnappyEncodeBuffer(p *[]byte) {
 	if cap(*p) > maxPooledSnappyEncodeCap {
 		return
 	}
@@ -41,7 +41,7 @@ func putSnappyEncodeBuf(p *[]byte) {
 }
 
 // snappyCompress compresses src using snappy and returns a pointer to the
-// pooled destination slice. The caller MUST putSnappyEncodeBuf the returned
+// pooled destination slice. The caller MUST releaseSnappyEncodeBuffer the returned
 // pointer once the bytes are no longer needed.
 func snappyCompress(src []byte) *[]byte {
 	bufPtr := snappyEncodeBufPool.Get().(*[]byte)

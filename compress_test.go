@@ -175,29 +175,29 @@ func TestCompressDecompress(t *testing.T) {
 	})
 }
 
-// TestReleaseLZWScratch_BoundedCap verifies the LZW scratch pool drops
+// TestReleaseLZWBuffer_BoundedCap verifies the LZW scratch pool drops
 // oversized buffers rather than retaining them forever.
-func TestReleaseLZWScratch_BoundedCap(t *testing.T) {
-	big := getLZWScratch()
-	big.Write(make([]byte, maxPooledLZWScratchCap+1))
-	require.Greater(t, big.Cap(), maxPooledLZWScratchCap)
+func TestReleaseLZWBuffer_BoundedCap(t *testing.T) {
+	big := getLZWBuffer()
+	big.Write(make([]byte, maxPooledLZWBufferCap+1))
+	require.Greater(t, big.Cap(), maxPooledLZWBufferCap)
 
-	releaseLZWScratch(big)
+	releaseLZWBuffer(big)
 	// We can't directly assert the pool's contents (sync.Pool's interface
 	// permits the runtime to drop entries on its own), but we can assert
-	// that getLZWScratch() never returns a buffer with cap > limit unless one
+	// that getLZWBuffer() never returns a buffer with cap > limit unless one
 	// was explicitly retained — release of an oversized buffer must not
 	// re-surface here.
 	for i := range 10 {
-		b := getLZWScratch()
-		require.LessOrEqual(t, b.Cap(), maxPooledLZWScratchCap,
+		b := getLZWBuffer()
+		require.LessOrEqual(t, b.Cap(), maxPooledLZWBufferCap,
 			"oversized buffer leaked through pool on iteration %d", i)
-		releaseLZWScratch(b)
+		releaseLZWBuffer(b)
 	}
 }
 
 // TestReleaseEncodeBuffer_BoundedCap is the encode-pool counterpart of
-// TestReleaseLZWScratch_BoundedCap.
+// TestReleaseLZWBuffer_BoundedCap.
 func TestReleaseEncodeBuffer_BoundedCap(t *testing.T) {
 	big := getEncodeBuffer()
 	big.Write(make([]byte, maxPooledEncodeBufCap+1))
@@ -255,13 +255,13 @@ func TestReleasePushPullBuffer_BoundedCap(t *testing.T) {
 	}
 }
 
-func TestMemberlist_initMetricLabels(t *testing.T) {
+func TestMemberlist_initCompressionMetricLabels(t *testing.T) {
 	base := []metrics.Label{{Name: "cluster", Value: "test"}}
 	m := &Memberlist{
 		metricLabels:    base,
 		compressionAlgo: snappyAlgo,
 	}
-	m.initMetricLabels()
+	m.initCompressionMetricLabels()
 
 	// Compress side.
 	require.Equal(t, []metrics.Label{
@@ -325,7 +325,7 @@ func TestDecompressErrors(t *testing.T) {
 			buf, err := lzwCompress(plain)
 			require.NoError(t, err)
 			compressed := append([]byte(nil), buf.Bytes()...)
-			releaseLZWScratch(buf)
+			releaseLZWBuffer(buf)
 
 			_, err = lzwDecompress(compressed)
 			require.EqualError(t, err, fmt.Sprintf("memberlist: LZW-decompressed payload exceeds %d bytes", maxDecompressBytes))
@@ -735,12 +735,12 @@ func BenchmarkEncryptLocalState(b *testing.B) {
 
 	// Build a minimal Memberlist with the bits encryptLocalState needs;
 	// avoiding newMemberlist here keeps the bench setup independent of
-	// network transport availability. initMetricLabels is called so the
+	// network transport availability. initCompressionMetricLabels is called so the
 	// bench remains valid if encryptLocalState (or the encryption path
 	// it sits on) ever gains metric instrumentation that reads the
 	// precomputed label slices.
 	m := &Memberlist{config: conf}
-	m.initMetricLabels()
+	m.initCompressionMetricLabels()
 
 	sizes := []int{1024, 64 * 1024, 1 << 20} // 1 KiB, 64 KiB, 1 MiB
 	for _, sz := range sizes {

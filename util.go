@@ -143,9 +143,17 @@ func encode(msgType messageType, in any, msgpackUseNewTimeFormat bool) (*bytes.B
 	return encodeWithSizeHint(msgType, in, msgpackUseNewTimeFormat, 0)
 }
 
-// encodeWithSizeHint is like encode but pre-grows the destination buffer
-// to sizeHint bytes when sizeHint > 0. Use it from call sites that know
-// the upcoming msgpack output size up front. sizeHint == 0 is a no-op.
+// encodeWithSizeHint writes an encoded object to a buffer drawn from
+// encodeBufPool, pre-grown to sizeHint bytes when sizeHint > 0. Use it
+// from call sites that know the upcoming msgpack output size up front.
+// sizeHint == 0 makes it equivalent to encode().
+//
+// On success the caller MUST releaseEncodeBuffer the returned buffer
+// once its bytes are no longer needed. On error the returned buffer is
+// nil; any pool buffer acquired internally has already been released,
+// so the caller does not need to release on the error path.
+//
+// The input `in` is not retained by the returned buffer.
 func encodeWithSizeHint(msgType messageType, in any, msgpackUseNewTimeFormat bool, sizeHint int) (*bytes.Buffer, error) {
 	buf := getEncodeBuffer()
 	if sizeHint > 0 {

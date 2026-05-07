@@ -757,7 +757,7 @@ func (m *Memberlist) handleUser(buf []byte, from net.Addr) {
 // the receive path. Each known algo gets a dedicated case keyed to a
 // named precomputed field; adding a new compressionType requires another
 // case. Forgetting to add the case is not a compile error — the default
-// arm builds a fresh slice via withLabel, so the new algo's metrics still
+// arm builds a fresh slice via withMetricLabel, so the new algo's metrics still
 // emit correctly but pay an allocation per call.
 //
 // Unknown algos (including unknownAlgo from a wrapper-decode failure)
@@ -769,7 +769,7 @@ func (m *Memberlist) decompressLabels(algo compressionType) []metrics.Label {
 	case snappyAlgo:
 		return m.decompressSnappyLabels
 	default:
-		return withLabel(m.metricLabels, "algo", algoLabel(algo))
+		return withMetricLabel(m.metricLabels, "algo", algoLabel(algo))
 	}
 }
 

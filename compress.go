@@ -78,11 +78,11 @@ func compressPayload(algo compressionType, inp []byte, msgpackUseNewTimeFormat b
 		if err != nil {
 			return nil, err
 		}
-		defer releaseLZWScratch(buf)
+		defer releaseLZWBuffer(buf)
 		encoded = buf.Bytes()
 	case snappyAlgo:
 		bufPtr := snappyCompress(inp)
-		defer putSnappyEncodeBuf(bufPtr)
+		defer releaseSnappyEncodeBuffer(bufPtr)
 		encoded = *bufPtr
 	default:
 		return nil, fmt.Errorf("memberlist: cannot compress with unknown algorithm %d", algo)
@@ -156,23 +156,23 @@ func algoLabel(algo compressionType) string {
 	}
 }
 
-// withLabel returns base + a metrics label `{<name>: <value>}`. The
+// withMetricLabel returns base + a metrics label `{<name>: <value>}`. The
 // returned slice has its capacity set to its length so subsequent appends
 // allocate a new array rather than mutating the precomputed slice. Used at
 // Memberlist construction time to precompute hot-path label slices.
-func withLabel(base []metrics.Label, name, value string) []metrics.Label {
+func withMetricLabel(base []metrics.Label, name, value string) []metrics.Label {
 	out := make([]metrics.Label, len(base), len(base)+1)
 	copy(out, base)
 	return append(out, metrics.Label{Name: name, Value: value})
 }
 
-// initMetricLabels populates the per-Memberlist precomputed metric label
+// initCompressionMetricLabels populates the per-Memberlist precomputed metric label
 // slices used on the compress/decompress hot paths. Called once at
 // construction; the resulting slices are read concurrently from the send
 // and receive paths and never mutated thereafter.
-func (m *Memberlist) initMetricLabels() {
-	m.compressMetricLabels = withLabel(m.metricLabels, "algo", algoLabel(m.compressionAlgo))
-	m.compressSkippedSizeWorseLabels = withLabel(m.compressMetricLabels, "reason", "size_worse_than_original")
-	m.decompressLZWLabels = withLabel(m.metricLabels, "algo", algoLabel(lzwAlgo))
-	m.decompressSnappyLabels = withLabel(m.metricLabels, "algo", algoLabel(snappyAlgo))
+func (m *Memberlist) initCompressionMetricLabels() {
+	m.compressMetricLabels = withMetricLabel(m.metricLabels, "algo", algoLabel(m.compressionAlgo))
+	m.compressSkippedSizeWorseLabels = withMetricLabel(m.compressMetricLabels, "reason", "size_worse_than_original")
+	m.decompressLZWLabels = withMetricLabel(m.metricLabels, "algo", algoLabel(lzwAlgo))
+	m.decompressSnappyLabels = withMetricLabel(m.metricLabels, "algo", algoLabel(snappyAlgo))
 }

@@ -16,44 +16,35 @@ const (
 	// is part of the wire format and must not be changed.
 	lzwLitWidth = 8
 
-	// maxPooledLZWScratchCap bounds the capacity of *bytes.Buffer values
-	// retained by lzwScratchBufferPool (LZW scratch). LZW output for a UDP
-	// packet (UDPBufferSize, default 1400 B) is small and bounded; 256 KiB
-	// covers any realistic scratch size without retaining outsized buffers.
-	maxPooledLZWScratchCap = 256 * 1024
+	// maxPooledLZWBufferCap bounds the capacity of *bytes.Buffer values
+	// retained by lzwBufferPool. LZW output for a UDP packet (UDPBufferSize,
+	// default 1400 B) is small and bounded; 256 KiB covers any realistic
+	// per-call size without retaining outsized buffers.
+	maxPooledLZWBufferCap = 256 * 1024
 )
 
-// lzwScratchBufferPool recycles *bytes.Buffer values used as LZW-scratch space
-// inside lzwCompress. The buffer is acquired and released within a single
-// compressPayload call; it never escapes to the network or is held across
-// goroutines, so it is safe to pool here.
-var lzwScratchBufferPool = sync.Pool{
+// lzwBufferPool recycles *bytes.Buffer values used inside lzwCompress to
+// hold the LZW-encoded output. The buffer is acquired and released within
+// a single compressPayload call; it never escapes to the network or is
+// held across goroutines, so it is safe to pool here.
+var lzwBufferPool = sync.Pool{
 	New: func() any {
 		return new(bytes.Buffer)
 	},
 }
 
-func getLZWScratch() *bytes.Buffer {
-	buf := lzwScratchBufferPool.Get().(*bytes.Buffer)
+func getLZWBuffer() *bytes.Buffer {
+	buf := lzwBufferPool.Get().(*bytes.Buffer)
 	buf.Reset()
 	return buf
 }
 
-func releaseLZWScratch(b *bytes.Buffer) {
-	if b.Cap() > maxPooledLZWScratchCap {
+func releaseLZWBuffer(b *bytes.Buffer) {
+	if b.Cap() > maxPooledLZWBufferCap {
 		return
 	}
 	b.Reset()
-	lzwScratchBufferPool.Put(b)
-}
-
-// lzwSrcReaderPool recycles *bytes.Reader values used as the source reader
-// for the LZW decoder. Callers MUST Reset(nil) before
-// Put to avoid pinning the previous src slice in the pool.
-var lzwSrcReaderPool = sync.Pool{
-	New: func() any {
-		return new(bytes.Reader)
-	},
+	lzwBufferPool.Put(b)
 }
 
 // lzwReaderInitSrc is a shared, never-mutated *bytes.Reader handed to
@@ -83,10 +74,10 @@ var lzwReaderPool = sync.Pool{
 }
 
 // lzwCompress lzw compresses src and returns the pooled scratch
-// buffer holding the encoded bytes. The caller MUST releaseLZWScratch the
+// buffer holding the encoded bytes. The caller MUST releaseLZWBuffer the
 // returned buffer once the bytes are no longer needed.
 func lzwCompress(src []byte) (*bytes.Buffer, error) {
-	buf := getLZWScratch()
+	buf := getLZWBuffer()
 	w := lzwWriterPool.Get().(*lzw.Writer)
 	// The writer is reusable after the next Reset, so we return it to the
 	// pool unconditionally.
@@ -94,11 +85,11 @@ func lzwCompress(src []byte) (*bytes.Buffer, error) {
 	w.Reset(buf, lzw.LSB, lzwLitWidth)
 
 	if _, err := w.Write(src); err != nil {
-		releaseLZWScratch(buf)
+		releaseLZWBuffer(buf)
 		return nil, fmt.Errorf("lzw compress: %w", err)
 	}
 	if err := w.Close(); err != nil {
-		releaseLZWScratch(buf)
+		releaseLZWBuffer(buf)
 		return nil, fmt.Errorf("lzw compress: %w", err)
 	}
 
@@ -110,14 +101,12 @@ func lzwCompress(src []byte) (*bytes.Buffer, error) {
 func lzwDecompress(src []byte) ([]byte, error) {
 	r := lzwReaderPool.Get().(*lzw.Reader)
 	defer lzwReaderPool.Put(r)
-	br := lzwSrcReaderPool.Get().(*bytes.Reader)
-	// Reset(nil) runs before Put, so the pooled reader doesn't pin src across
-	// the next Get. Two top-level defers stay open-coded;
+	// Reset to the never-mutated placeholder before Put so the pooled
+	// reader doesn't retain src (or its bytes.Reader wrapper) across
+	// its idle period in the pool. Two top-level defers stay open-coded;
 	// a defer of an anonymous closure would heap-allocate the closure literal.
-	defer lzwSrcReaderPool.Put(br)
-	defer br.Reset(nil)
-	br.Reset(src)
-	r.Reset(br, lzw.LSB, lzwLitWidth)
+	defer r.Reset(lzwReaderInitSrc, lzw.LSB, lzwLitWidth)
+	r.Reset(bytes.NewReader(src), lzw.LSB, lzwLitWidth)
 
 	// io.LimitedReader as a value, not via io.LimitReader. The wrapper
 	// function returns &LimitedReader{...} unconditionally; using a value
