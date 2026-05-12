@@ -44,10 +44,6 @@ type Transport interface {
 	// underlying plumbing to a minimum. We also treat the address here as a
 	// string, similar to Dial, so it's network neutral, so this usually is
 	// in the form of "host:port".
-	//
-	// Implementations MUST NOT retain b after WriteTo returns. The caller
-	// is free to reuse the underlying memory (it may be a pooled buffer)
-	// once the call has returned.
 	WriteTo(b []byte, addr string) (time.Time, error)
 
 	// PacketCh returns a channel that can be read to receive incoming
@@ -101,9 +97,6 @@ type IngestionAwareTransport interface {
 
 type NodeAwareTransport interface {
 	Transport
-	// WriteToAddress is the node-aware variant of WriteTo. The same
-	// non-retention contract applies: implementations MUST NOT retain b
-	// after WriteToAddress returns.
 	WriteToAddress(b []byte, addr Address) (time.Time, error)
 	DialAddressTimeout(addr Address, timeout time.Duration) (net.Conn, error)
 }

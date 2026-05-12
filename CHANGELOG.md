@@ -6,6 +6,13 @@
   an alternative to the LZW default. Receivers always decode every supported
   algorithm; senders emit only the configured one. Default behaviour is
   unchanged.
+
+  Rollout note: every cluster member must be upgraded to a build that decodes
+  snappy BEFORE any member is configured to emit it. A receiver that does not
+  know the algorithm logs `cannot decompress unknown algorithm` and drops the
+  packet — it does not panic. On the gossip path the message is retried; on
+  the direct-probe path the drop can cause spurious dead-marking during a
+  partial rollout.
 - Pool `*bytes.Buffer` values used along the gossip and push-pull paths so
   the buffer struct and its growth path are reused across calls. The
   steady-state win is largest on the compression/encode hot path; the

@@ -355,20 +355,19 @@ func (m *Memberlist) probeNode(node *NodeState) {
 		}
 	} else {
 		var msgs [][]byte
-		pingBuf, err := encode(pingMsg, &ping, m.config.MsgpackUseNewTimeFormat)
-		if err != nil {
+		if buf, err := encode(pingMsg, &ping, m.config.MsgpackUseNewTimeFormat); err != nil {
 			m.logger.Printf("[ERR] memberlist: Failed to encode UDP ping message: %s", err)
 			return
+		} else {
+			msgs = append(msgs, buf)
 		}
-		msgs = append(msgs, pingBuf)
-
 		s := suspect{Incarnation: node.Incarnation, Node: node.Name, From: m.config.Name}
-		suspectBuf, err := encode(suspectMsg, &s, m.config.MsgpackUseNewTimeFormat)
-		if err != nil {
+		if buf, err := encode(suspectMsg, &s, m.config.MsgpackUseNewTimeFormat); err != nil {
 			m.logger.Printf("[ERR] memberlist: Failed to encode suspect message: %s", err)
 			return
+		} else {
+			msgs = append(msgs, buf)
 		}
-		msgs = append(msgs, suspectBuf)
 
 		compound := makeCompoundMessage(msgs)
 		if err := m.rawSendMsgPacket(node.FullAddress(), &node.Node, compound); err != nil {
@@ -634,7 +633,8 @@ func (m *Memberlist) gossip() {
 			}
 		} else {
 			// Otherwise create and send one or more compound messages
-			for _, compound := range makeCompoundMessages(msgs) {
+			compounds := makeCompoundMessages(msgs)
+			for _, compound := range compounds {
 				if err := m.rawSendMsgPacket(node.FullAddress(), &node, compound); err != nil {
 					m.logger.Printf("[ERR] memberlist: Failed to send gossip to %s: %s", addr, err)
 				}

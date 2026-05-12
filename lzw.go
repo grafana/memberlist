@@ -127,5 +127,5 @@ func lzwDecompress(src []byte) ([]byte, error) {
 	if buf.Len() > maxDecompressBytes {
 		return nil, fmt.Errorf("memberlist: LZW-decompressed payload exceeds %d bytes", maxDecompressBytes)
 	}
-	return buf.Bytes(), nil
+	return bytes.Clone(buf.Bytes()), nil
 }

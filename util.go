@@ -56,7 +56,7 @@ var encodeBufPool = sync.Pool{
 // exceed 1 MiB and are intentionally not pooled — they're rare and we'd
 // otherwise pin ~tens of MiB of idle pool footprint per goroutine that
 // happens to encode a large push-pull payload.
-const maxPooledEncodeBufCap = 1 << 20
+const maxPooledEncodeBufCap = 1 << 20 // 1 MiB
 
 func getEncodeBuffer() *bytes.Buffer {
 	b := encodeBufPool.Get().(*bytes.Buffer)
@@ -280,7 +280,7 @@ func makeCompoundMessages(msgs [][]byte) [][]byte {
 	)
 
 	// Optimistically assume there will be no big message.
-	out := make([][]byte, 0, (len(msgs)+(maxMsgs-1))/maxMsgs)
+	bufs := make([][]byte, 0, (len(msgs)+(maxMsgs-1))/maxMsgs)
 
 	// Do not add to a compound message any message bigger than the max message length
 	// we can store.
@@ -297,25 +297,25 @@ func makeCompoundMessages(msgs [][]byte) [][]byte {
 		// Oversized message — send it alone. Copy so the caller owns
 		// the returned slice independently of the input it passed in.
 		cp := append([]byte(nil), msgs[r]...)
-		out = append(out, cp)
+		bufs = append(bufs, cp)
 		r++
 	}
 	msgs = msgs[:w]
 
 	// Group remaining messages in compound message(s).
 	for ; len(msgs) > maxMsgs; msgs = msgs[maxMsgs:] {
-		out = append(out, makeCompoundMessage(msgs[:maxMsgs]))
+		bufs = append(bufs, makeCompoundMessage(msgs[:maxMsgs]))
 	}
 	if len(msgs) > 0 {
-		out = append(out, makeCompoundMessage(msgs))
+		bufs = append(bufs, makeCompoundMessage(msgs))
 	}
 
-	return out
+	return bufs
 }
 
-// makeCompoundMessage takes a list of messages and generates a single
-// compound message containing all of them. Returns a freshly-allocated
-// byte slice owned by the caller.
+// makeCompoundMessage takes a list of messages and generates
+// a single compound message containing all of them.
+// Returns a freshly-allocated byte slice owned by the caller.
 func makeCompoundMessage(msgs [][]byte) []byte {
 	buf := getEncodeBuffer()
 	defer releaseEncodeBuffer(buf)

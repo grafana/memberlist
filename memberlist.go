@@ -160,6 +160,11 @@ func newMemberlist(conf *Config) (*Memberlist, error) {
 		logger = log.New(logDest, "", log.LstdFlags)
 	}
 
+	algo, err := resolveCompressionAlgorithm(conf.CompressionAlgorithm)
+	if err != nil {
+		return nil, err
+	}
+
 	// Set up a network transport by default if a custom one wasn't given
 	// by the config.
 	transport := conf.Transport
@@ -227,11 +232,6 @@ func newMemberlist(conf *Config) (*Memberlist, error) {
 			label:              conf.Label,
 			NodeAwareTransport: nodeAwareTransport,
 		}
-	}
-
-	algo, err := resolveCompressionAlgorithm(conf.CompressionAlgorithm)
-	if err != nil {
-		return nil, err
 	}
 
 	m := &Memberlist{

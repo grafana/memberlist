@@ -61,9 +61,9 @@ func (m *Memberlist) encodeBroadcastNotify(node string, msgType messageType, msg
 	buf, err := encode(msgType, msg, m.config.MsgpackUseNewTimeFormat)
 	if err != nil {
 		m.logger.Printf("[ERR] memberlist: Failed to encode message for broadcast: %s", err)
-		return
+	} else {
+		m.queueBroadcast(node, buf, notify)
 	}
-	m.queueBroadcast(node, buf, notify)
 }
 
 // queueBroadcast is used to start dissemination of a message. It will be

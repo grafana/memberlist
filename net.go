@@ -896,15 +896,18 @@ func (m *Memberlist) rawSendMsgPacket(a Address, node *Node, msg []byte) error {
 		// MTU-sized packet for any UDP send). Copy out before
 		// WriteToAddress so the pool buffer doesn't escape into the
 		// transport layer.
-		primaryKey := m.config.Keyring.GetPrimaryKey()
-		packetLabel := []byte(m.config.Label)
-		encryptBuf := getEncodeBuffer()
-		defer releaseEncodeBuffer(encryptBuf)
-		if err := encryptPayload(m.encryptionVersion(), primaryKey, msg, packetLabel, encryptBuf); err != nil {
+		var (
+			primaryKey  = m.config.Keyring.GetPrimaryKey()
+			packetLabel = []byte(m.config.Label)
+			buf         = getEncodeBuffer()
+		)
+		defer releaseEncodeBuffer(buf)
+		err := encryptPayload(m.encryptionVersion(), primaryKey, msg, packetLabel, buf)
+		if err != nil {
 			m.logger.Printf("[ERR] memberlist: Encryption of message failed: %v", err)
 			return err
 		}
-		msg = bytes.Clone(encryptBuf.Bytes())
+		msg = bytes.Clone(buf.Bytes())
 	}
 
 	metrics.IncrCounterWithLabels([]string{"memberlist", "udp", "sent"}, float32(len(msg)), m.metricLabels)
@@ -914,8 +917,6 @@ func (m *Memberlist) rawSendMsgPacket(a Address, node *Node, msg []byte) error {
 
 // rawSendMsgStream is used to stream a message to another host without
 // modification, other than applying compression and encryption if enabled.
-// sendBuf may be backed by pool memory owned by the caller; it is read
-// synchronously and must not be retained past this function's return.
 func (m *Memberlist) rawSendMsgStream(conn net.Conn, sendBuf []byte, streamLabel string) error {
 	// Check if compression is enabled
 	if m.config.EnableCompression {
@@ -941,12 +942,12 @@ func (m *Memberlist) rawSendMsgStream(conn net.Conn, sendBuf []byte, streamLabel
 
 	// Check if encryption is enabled
 	if m.config.EncryptionEnabled() && m.config.GossipVerifyOutgoing {
-		cryptBuf, err := m.encryptLocalState(sendBuf, streamLabel)
+		crypt, err := m.encryptLocalState(sendBuf, streamLabel)
 		if err != nil {
 			m.logger.Printf("[ERROR] memberlist: Failed to encrypt local state: %v", err)
 			return err
 		}
-		sendBuf = cryptBuf
+		sendBuf = crypt
 	}
 
 	// Write out the entire send buffer
@@ -1128,13 +1129,13 @@ func (m *Memberlist) sendLocalState(conn net.Conn, join bool, streamLabel string
 	moreBytes := binary.BigEndian.Uint32(bufConn.Bytes()[1:5])
 	metrics.SetGaugeWithLabels([]string{"memberlist", "size", "local"}, float32(moreBytes), m.metricLabels)
 
+	// Get the send buffer
 	return m.rawSendMsgStream(conn, bufConn.Bytes(), streamLabel)
 }
 
 // encryptLocalState encrypts a local-state payload for stream send.
-// Returns a freshly-allocated byte slice owned by the caller; the
-// internal pool buffer is released before return. On error nil is
-// returned.
+// Returns a freshly-allocated byte slice owned by the caller.
+// On error nil is returned.
 func (m *Memberlist) encryptLocalState(sendBuf []byte, streamLabel string) ([]byte, error) {
 	buf := getPushPullBuffer()
 	defer releasePushPullBuffer(buf)
@@ -1157,7 +1158,8 @@ func (m *Memberlist) encryptLocalState(sendBuf []byte, streamLabel string) ([]by
 
 	// Write the encrypted cipher text to the buffer
 	key := m.config.Keyring.GetPrimaryKey()
-	if err := encryptPayload(encVsn, key, sendBuf, dataBytes, buf); err != nil {
+	err := encryptPayload(encVsn, key, sendBuf, dataBytes, buf)
+	if err != nil {
 		return nil, err
 	}
 	return bytes.Clone(buf.Bytes()), nil

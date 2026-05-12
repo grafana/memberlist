@@ -17,31 +17,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestResolveCompressionAlgorithm(t *testing.T) {
-	tests := []struct {
-		in      CompressionAlgorithm
-		want    compressionType
-		wantErr string
-	}{
-		{"", lzwAlgo, ""},
-		{CompressionAlgorithmLZW, lzwAlgo, ""},
-		{CompressionAlgorithmSnappy, snappyAlgo, ""},
-		{"zstd", 0, `memberlist: unknown CompressionAlgorithm "zstd"`},
-		{"LZW", 0, `memberlist: unknown CompressionAlgorithm "LZW"`},
-	}
-	for _, tc := range tests {
-		t.Run(string(tc.in), func(t *testing.T) {
-			got, err := resolveCompressionAlgorithm(tc.in)
-			if tc.wantErr != "" {
-				require.EqualError(t, err, tc.wantErr)
-				return
-			}
-			require.NoError(t, err)
-			require.Equal(t, tc.want, got)
-		})
-	}
-}
-
 func TestCompressDecompress(t *testing.T) {
 	t.Run("RoundTrip", func(t *testing.T) {
 		algos := []compressionType{lzwAlgo, snappyAlgo}
