@@ -105,15 +105,9 @@ func (t *MockTransport) WriteToAddress(b []byte, a Address) (time.Time, error) {
 		return time.Time{}, err
 	}
 
-	// The Transport contract requires implementations not to retain b
-	// after WriteToAddress returns. The receiver may still hold pkt.Buf
-	// after the sender has returned (the channel send synchronizes the
-	// handoff, not the consumption), so copy before enqueueing.
-	buf := append([]byte(nil), b...)
-
 	now := time.Now()
 	dest.packetCh <- &Packet{
-		Buf:       buf,
+		Buf:       b,
 		From:      t.addr,
 		Timestamp: now,
 	}

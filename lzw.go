@@ -82,6 +82,11 @@ func lzwCompress(src []byte) (*bytes.Buffer, error) {
 	// The writer is reusable after the next Reset, so we return it to the
 	// pool unconditionally.
 	defer lzwWriterPool.Put(w)
+	// Reset to io.Discard before Put so the pooled writer doesn't retain
+	// the pool *bytes.Buffer across its idle period. Same shape as
+	// lzwDecompress (see the comment there for why two top-level defers
+	// are open-coded instead of a single closure).
+	defer w.Reset(io.Discard, lzw.LSB, lzwLitWidth)
 	w.Reset(buf, lzw.LSB, lzwLitWidth)
 
 	if _, err := w.Write(src); err != nil {

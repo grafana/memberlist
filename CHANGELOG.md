@@ -13,16 +13,19 @@
   packet — it does not panic. On the gossip path the message is retried; on
   the direct-probe path the drop can cause spurious dead-marking during a
   partial rollout.
-- Pool `*bytes.Buffer` values used along the gossip and push-pull paths so
-  the buffer struct and its growth path are reused across calls. The
-  steady-state win is largest on the compression/encode hot path; the
+- Reduce per-call allocations on the gossip and push-pull paths by reusing
+  internal scratch buffers across calls. Every public-surface function
+  (`encode`, `compressPayload`, `makeCompoundMessage(s)`, `encryptLocalState`)
+  still returns a freshly-allocated `[]byte` independent of any pool — the
+  pools are used internally only, to amortize the msgpack / LZW / snappy /
+  encryption growth allocations that would otherwise occur on every call.
+  The steady-state win is largest on the compression/encode hot path; the
   encryption-pool win is bounded by allocations inside `crypto/cipher`'s
   `gcm.Seal` that pooling does not reach. Covers:
   - LZW writers/readers and snappy destination buffers (compression).
-  - The msgpack encode buffer used by `encode()` and propagated through
-    `compressPayload`.
-  - The compound-message buffers produced by `makeCompoundMessage(s)`.
-  - The UDP encryption buffer in `rawSendMsgPacket`.
+  - The internal scratch buffer used by `encode()` and `compressPayload`.
+  - The compound-message scratch buffer used by `makeCompoundMessage(s)`.
+  - The UDP encryption scratch buffer in `rawSendMsgPacket`.
   - A separate large-buffer pool covering TCP push-pull state, push-pull
     encryption (`encryptLocalState` / `decryptRemoteState`), and user
     messages (`sendUserMsg`), sized for `maxPushStateBytes`.
