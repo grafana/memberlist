@@ -38,45 +38,11 @@ func decode(buf []byte, out interface{}) error {
 	return dec.Decode(out)
 }
 
-// encodeBufPool recycles *bytes.Buffer values produced by encode(). The
-// buffer's backing slice is grown by msgpack during encoding; pooling lets
-// subsequent calls reuse the grown slice instead of reallocating.
-//
-// Pool callers MUST releaseEncodeBuffer once they are done with the
-// returned buffer's bytes.
-var encodeBufPool = sync.Pool{
-	New: func() any {
-		return new(bytes.Buffer)
-	},
-}
-
-// maxPooledEncodeBufCap bounds the capacity of buffers retained by
-// encodeBufPool. The cap targets the high-rate UDP/gossip path, where
-// encoded messages are at most a few KiB. TCP push-pull encodes can
-// exceed 1 MiB and are intentionally not pooled — they're rare and we'd
-// otherwise pin ~tens of MiB of idle pool footprint per goroutine that
-// happens to encode a large push-pull payload.
-const maxPooledEncodeBufCap = 1 << 20 // 1 MiB
-
-func getEncodeBuffer() *bytes.Buffer {
-	b := encodeBufPool.Get().(*bytes.Buffer)
-	b.Reset()
-	return b
-}
-
-func releaseEncodeBuffer(b *bytes.Buffer) {
-	if b.Cap() > maxPooledEncodeBufCap {
-		return
-	}
-	b.Reset()
-	encodeBufPool.Put(b)
-}
-
-// pushPullBufPool recycles *bytes.Buffer values used on the TCP push-pull
-// encryption path. Push-pull state can approach maxPushStateBytes, which exceeds
-// encodeBufPool's cap policy by a long way; a dedicated pool with its
-// own ceiling lets us reuse those large buffers without bloating the
-// encode pool's idle footprint.
+// pushPullBufPool recycles *bytes.Buffer values used by decryptRemoteState
+// to stage cipher text as it streams in from the peer. Push-pull state
+// can approach maxPushStateBytes (20 MiB), so pooling here lets the
+// io.CopyN growth steps amortize across receives instead of starting
+// from zero capacity every time.
 //
 // Pool callers MUST releasePushPullBuffer once they are done with the
 // returned buffer's bytes.
@@ -134,8 +100,7 @@ func encode(msgType messageType, in any, msgpackUseNewTimeFormat bool) ([]byte, 
 // that know the upcoming msgpack output size up front.
 // sizeHint == 0 makes it equivalent to encode().
 func encodeWithSizeHint(msgType messageType, in any, msgpackUseNewTimeFormat bool, sizeHint int) ([]byte, error) {
-	buf := getEncodeBuffer()
-	defer releaseEncodeBuffer(buf)
+	buf := bytes.NewBuffer(nil)
 	if sizeHint > 0 {
 		buf.Grow(sizeHint)
 	}
@@ -146,7 +111,7 @@ func encodeWithSizeHint(msgType messageType, in any, msgpackUseNewTimeFormat boo
 	if err := codec.NewEncoder(buf, &hd).Encode(in); err != nil {
 		return nil, err
 	}
-	return bytes.Clone(buf.Bytes()), nil
+	return buf.Bytes(), nil
 }
 
 // Returns a random offset between 0 and n
@@ -317,15 +282,13 @@ func makeCompoundMessages(msgs [][]byte) [][]byte {
 // a single compound message containing all of them.
 // Returns a freshly-allocated byte slice owned by the caller.
 func makeCompoundMessage(msgs [][]byte) []byte {
-	buf := getEncodeBuffer()
-	defer releaseEncodeBuffer(buf)
-
 	// Pre-size the buffer to the exact compound length (1 type byte +
 	// 1 count byte + 2 bytes per length prefix + the message bodies).
 	total := 2 + 2*len(msgs)
 	for _, m := range msgs {
 		total += len(m)
 	}
+	buf := bytes.NewBuffer(nil)
 	buf.Grow(total)
 
 	// Write out the type
@@ -344,7 +307,7 @@ func makeCompoundMessage(msgs [][]byte) []byte {
 		buf.Write(m)
 	}
 
-	return bytes.Clone(buf.Bytes())
+	return buf.Bytes()
 }
 
 // decodeCompoundMessage splits a compound message and returns

@@ -165,40 +165,13 @@ func TestReleaseLZWBuffer_BoundedCap(t *testing.T) {
 	}
 }
 
-// TestReleaseEncodeBuffer_BoundedCap is the encode-pool counterpart of
-// TestReleaseLZWBuffer_BoundedCap.
-func TestReleaseEncodeBuffer_BoundedCap(t *testing.T) {
-	big := getEncodeBuffer()
-	big.Write(make([]byte, maxPooledEncodeBufCap+1))
-	require.Greater(t, big.Cap(), maxPooledEncodeBufCap)
-	releaseEncodeBuffer(big)
-
-	for i := range 10 {
-		b := getEncodeBuffer()
-		require.LessOrEqual(t, b.Cap(), maxPooledEncodeBufCap,
-			"oversized buffer leaked through encode pool on iteration %d", i)
-		releaseEncodeBuffer(b)
-	}
-}
-
-// TestEncodeBuffer_Reused asserts the encode pool actually pools — i.e.,
-// steady-state Get/Release cycles don't allocate. A regression that drops
-// the pool path entirely (e.g., always returning new(bytes.Buffer)) would
-// cause one alloc per iteration and fail this test.
+// TestPushPullBuffer_Reused asserts the push-pull pool actually pools —
+// i.e., steady-state Get/Release cycles don't allocate. A regression that
+// drops the pool path entirely (e.g., always returning new(bytes.Buffer))
+// would cause one alloc per iteration and fail this test.
 //
 // sync.Pool may drop entries on GC, so we measure averaged allocations
 // across many iterations and tolerate a small upper bound.
-func TestEncodeBuffer_Reused(t *testing.T) {
-	allocs := testing.AllocsPerRun(1000, func() {
-		b := getEncodeBuffer()
-		b.WriteString("hello")
-		releaseEncodeBuffer(b)
-	})
-	require.Less(t, allocs, 0.5, "expected encode pool to amortize allocations to ~0/op")
-}
-
-// TestPushPullBuffer_Reused is the push-pull-pool counterpart of
-// TestEncodeBuffer_Reused.
 func TestPushPullBuffer_Reused(t *testing.T) {
 	allocs := testing.AllocsPerRun(1000, func() {
 		b := getPushPullBuffer()
@@ -209,7 +182,7 @@ func TestPushPullBuffer_Reused(t *testing.T) {
 }
 
 // TestReleasePushPullBuffer_BoundedCap is the push-pull-pool counterpart
-// of TestReleaseEncodeBuffer_BoundedCap.
+// of TestReleaseLZWBuffer_BoundedCap.
 func TestReleasePushPullBuffer_BoundedCap(t *testing.T) {
 	big := getPushPullBuffer()
 	big.Write(make([]byte, maxPooledPushPullBufCap+1))

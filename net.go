@@ -892,23 +892,17 @@ func (m *Memberlist) rawSendMsgPacket(a Address, node *Node, msg []byte) error {
 
 	// Check if we have encryption enabled
 	if m.config.EncryptionEnabled() && m.config.GossipVerifyOutgoing {
-		// Encrypt the payload. Use the encode pool: same buffer kind,
-		// same sizing requirements (encrypted output sits within an
-		// MTU-sized packet for any UDP send). Copy out before
-		// WriteToAddress so the pool buffer doesn't escape into the
-		// transport layer.
 		var (
 			primaryKey  = m.config.Keyring.GetPrimaryKey()
 			packetLabel = []byte(m.config.Label)
-			buf         = getEncodeBuffer()
+			buf         = bytes.NewBuffer(nil)
 		)
-		defer releaseEncodeBuffer(buf)
 		err := encryptPayload(m.encryptionVersion(), primaryKey, msg, packetLabel, buf)
 		if err != nil {
 			m.logger.Printf("[ERR] memberlist: Encryption of message failed: %v", err)
 			return err
 		}
-		msg = bytes.Clone(buf.Bytes())
+		msg = buf.Bytes()
 	}
 
 	metrics.IncrCounterWithLabels([]string{"memberlist", "udp", "sent"}, float32(len(msg)), m.metricLabels)
@@ -1133,8 +1127,7 @@ func (m *Memberlist) sendLocalState(conn net.Conn, join bool, streamLabel string
 // Returns a freshly-allocated byte slice owned by the caller.
 // On error nil is returned.
 func (m *Memberlist) encryptLocalState(sendBuf []byte, streamLabel string) ([]byte, error) {
-	buf := getPushPullBuffer()
-	defer releasePushPullBuffer(buf)
+	buf := bytes.NewBuffer(nil)
 
 	// Write the encryptMsg byte
 	buf.WriteByte(byte(encryptMsg))
@@ -1158,7 +1151,7 @@ func (m *Memberlist) encryptLocalState(sendBuf []byte, streamLabel string) ([]by
 	if err != nil {
 		return nil, err
 	}
-	return bytes.Clone(buf.Bytes()), nil
+	return buf.Bytes(), nil
 }
 
 // decryptRemoteState is used to help decrypt the remote state

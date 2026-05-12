@@ -13,23 +13,16 @@
   packet — it does not panic. On the gossip path the message is retried; on
   the direct-probe path the drop can cause spurious dead-marking during a
   partial rollout.
-- Reduce per-call allocations on the gossip and push-pull paths by reusing
-  internal scratch buffers across calls. Every public-surface function
-  (`encode`, `compressPayload`, `makeCompoundMessage(s)`, `encryptLocalState`)
-  still returns a freshly-allocated `[]byte` independent of any pool — the
-  pools are used internally only, to amortize the msgpack / LZW / snappy /
-  encryption growth allocations that would otherwise occur on every call.
-  The steady-state win is largest on the compression/encode hot path; the
-  encryption-pool win is bounded by allocations inside `crypto/cipher`'s
-  `gcm.Seal` that pooling does not reach. Covers:
+- Reduce per-call allocations on the compression and push-pull receive
+  paths by reusing internal scratch buffers. Pools are internal only;
+  public-surface returns allocate fresh memory each call. Covers:
   - LZW writers/readers and snappy destination buffers (compression).
-  - The internal scratch buffer used by `encode()` and `compressPayload`.
-  - The compound-message scratch buffer used by `makeCompoundMessage(s)`.
-  - The UDP encryption scratch buffer in `rawSendMsgPacket`.
-  - A separate large-buffer pool for the push-pull encryption path
-    (`encryptLocalState` / `decryptRemoteState`), sized for
-    `maxPushStateBytes`. The pool buffer never escapes the encrypt /
-    decrypt scope — the caller receives a freshly-allocated slice.
+  - A large-buffer pool for the push-pull receive path
+    (`decryptRemoteState`), sized for `maxPushStateBytes`. Pooling
+    here amortizes `io.CopyN` growth across receives. The send side
+    (`encryptLocalState`) does not pool — `encryptPayload` pre-`Grow`s
+    the destination to its exact encrypted length in one shot, so a
+    fresh per-call buffer allocates once and never grows.
 - Add per-algorithm compression metrics:
   `memberlist_compress_attempts_total{algo}`,
   `memberlist_compress_skipped_total{algo,reason="size_worse_than_original"}`,

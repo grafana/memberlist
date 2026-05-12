@@ -56,24 +56,6 @@ func TestEncodeDecode(t *testing.T) {
 	}
 }
 
-func TestEncode_DoesNotRetainScratch(t *testing.T) {
-	// Lock down the contract: encode returns a slice that is independent
-	// of any internal pool, so subsequent encode calls (which churn the
-	// same pool) cannot mutate an earlier return.
-	msg := &ping{SeqNo: 100}
-	out, err := encode(pingMsg, msg, false)
-	require.NoError(t, err)
-	snapshot := append([]byte(nil), out...)
-
-	for range 5 {
-		churn := &ping{SeqNo: 999}
-		_, err := encode(pingMsg, churn, false)
-		require.NoError(t, err)
-	}
-
-	require.Equal(t, snapshot, out)
-}
-
 func TestRandomOffset(t *testing.T) {
 	vals := make(map[int]struct{})
 	for i := 0; i < 100; i++ {
@@ -457,24 +439,6 @@ func TestMakeCompoundMessage(t *testing.T) {
 	if len(compound) != 3*len(buf)+3*compoundOverhead+compoundHeaderOverhead {
 		t.Fatalf("bad len")
 	}
-}
-
-func TestMakeCompoundMessage_DoesNotRetainScratch(t *testing.T) {
-	// Lock down the contract: makeCompoundMessage returns a slice that is
-	// independent of any internal pool, so subsequent calls (which churn
-	// the same pool) cannot mutate an earlier return.
-	msg := &ping{SeqNo: 100}
-	buf, err := encode(pingMsg, msg, false)
-	require.NoError(t, err)
-
-	out := makeCompoundMessage([][]byte{buf, buf, buf})
-	snapshot := append([]byte(nil), out...)
-
-	for range 5 {
-		makeCompoundMessage([][]byte{buf, buf, buf, buf})
-	}
-
-	require.Equal(t, snapshot, out)
 }
 
 func TestDecodeCompoundMessage(t *testing.T) {
