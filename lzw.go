@@ -93,6 +93,7 @@ func lzwCompress(src []byte) (*bytes.Buffer, error) {
 		releaseLZWBuffer(buf)
 		return nil, fmt.Errorf("lzw compress: %w", err)
 	}
+	// Ensure we flush everything out
 	if err := w.Close(); err != nil {
 		releaseLZWBuffer(buf)
 		return nil, fmt.Errorf("lzw compress: %w", err)

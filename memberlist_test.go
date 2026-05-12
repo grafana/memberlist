@@ -387,9 +387,9 @@ func TestCreate(t *testing.T) {
 			wantInternal compressionType
 			wantErr      string
 		}{
-			{"empty default", "", lzwAlgo, ""},
-			{"explicit lzw", CompressionAlgorithmLZW, lzwAlgo, ""},
-			{"explicit snappy", CompressionAlgorithmSnappy, snappyAlgo, ""},
+			{"empty default", "", lzwCompressionType, ""},
+			{"explicit lzw", CompressionAlgorithmLZW, lzwCompressionType, ""},
+			{"explicit snappy", CompressionAlgorithmSnappy, snappyCompressionType, ""},
 			{"unknown algo", "zstd", 0, `memberlist: unknown CompressionAlgorithm "zstd"`},
 			{"wrong case", "LZW", 0, `memberlist: unknown CompressionAlgorithm "LZW"`},
 		}

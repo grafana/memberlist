@@ -758,16 +758,16 @@ func (m *Memberlist) handleUser(buf []byte, from net.Addr) {
 // arm builds a fresh slice via withMetricLabel, so the new algo's metrics still
 // emit correctly but pay an allocation per call.
 //
-// Unknown algos (including unknownAlgo from a wrapper-decode failure)
+// Unknown algos (including unknownCompressionType from a wrapper-decode failure)
 // also fall through to the default arm.
 func (m *Memberlist) decompressLabels(algo compressionType) []metrics.Label {
 	switch algo {
-	case lzwAlgo:
+	case lzwCompressionType:
 		return m.decompressLZWLabels
-	case snappyAlgo:
+	case snappyCompressionType:
 		return m.decompressSnappyLabels
 	default:
-		return withMetricLabel(m.metricLabels, "algo", algoLabel(algo))
+		return withMetricLabel(m.metricLabels, "algo", compressionTypeLabel(algo))
 	}
 }
 
@@ -776,7 +776,7 @@ func (m *Memberlist) handleCompressed(buf []byte, from net.Addr, timestamp time.
 	algo, payload, err := decompressPayload(buf)
 	// attempts_total is incremented unconditionally (mirroring the compress
 	// side's `compress_attempts_total`). On wrapper-decode failure algo is
-	// unknownAlgo, which surfaces as algo="unknown" via decompressLabels.
+	// unknownCompressionType, which surfaces as algo="unknown" via decompressLabels.
 	metrics.IncrCounterWithLabels(metricDecompressAttempts, 1,
 		m.decompressLabels(algo))
 	if err != nil {
@@ -848,6 +848,7 @@ func (m *Memberlist) rawSendMsgPacket(a Address, node *Node, msg []byte) error {
 			m.compressMetricLabels)
 		buf, err := compressPayload(m.compressionAlgo, msg, m.config.MsgpackUseNewTimeFormat)
 		if err != nil {
+			// Compression failed — fall back to plaintext.
 			metrics.IncrCounterWithLabels(metricCompressErrors, 1,
 				m.compressMetricLabels)
 			m.logger.Printf("[WARN] memberlist: Failed to compress payload: %v", err)
@@ -924,6 +925,7 @@ func (m *Memberlist) rawSendMsgStream(conn net.Conn, sendBuf []byte, streamLabel
 			m.compressMetricLabels)
 		compBuf, err := compressPayload(m.compressionAlgo, sendBuf, m.config.MsgpackUseNewTimeFormat)
 		if err != nil {
+			// Compression failed — fall back to plaintext.
 			metrics.IncrCounterWithLabels(metricCompressErrors, 1,
 				m.compressMetricLabels)
 			m.logger.Printf("[ERROR] memberlist: Failed to compress payload: %v", err)
@@ -1258,12 +1260,12 @@ func (m *Memberlist) readStream(conn net.Conn, streamLabel string) (messageType,
 		var c compressedPayload
 		if err := dec.Decode(&c); err != nil {
 			// Wrapper-decode failure happens before any algo tag is read
-			// from the wire; emit with unknownAlgo so the metric is
+			// from the wire; emit with unknownCompressionType so the metric is
 			// symmetric with handleCompressed (UDP) which routes the same
-			// case via decompressPayload's unknownAlgo sentinel. attempts
+			// case via decompressPayload's unknownCompressionType sentinel. attempts
 			// counts everything we tried to decompress, including malformed
 			// frames, mirroring the compress side's denominator semantics.
-			unknownLabels := m.decompressLabels(unknownAlgo)
+			unknownLabels := m.decompressLabels(unknownCompressionType)
 			metrics.IncrCounterWithLabels(metricDecompressAttempts, 1, unknownLabels)
 			metrics.IncrCounterWithLabels(metricDecompressErrors, 1, unknownLabels)
 			return 0, nil, nil, err
