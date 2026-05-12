@@ -26,9 +26,10 @@
   - The internal scratch buffer used by `encode()` and `compressPayload`.
   - The compound-message scratch buffer used by `makeCompoundMessage(s)`.
   - The UDP encryption scratch buffer in `rawSendMsgPacket`.
-  - A separate large-buffer pool covering TCP push-pull state, push-pull
-    encryption (`encryptLocalState` / `decryptRemoteState`), and user
-    messages (`sendUserMsg`), sized for `maxPushStateBytes`.
+  - A separate large-buffer pool for the push-pull encryption path
+    (`encryptLocalState` / `decryptRemoteState`), sized for
+    `maxPushStateBytes`. The pool buffer never escapes the encrypt /
+    decrypt scope — the caller receives a freshly-allocated slice.
 - Add per-algorithm compression metrics:
   `memberlist_compress_attempts_total{algo}`,
   `memberlist_compress_skipped_total{algo,reason="size_worse_than_original"}`,

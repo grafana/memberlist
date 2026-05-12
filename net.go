@@ -978,8 +978,7 @@ func (m *Memberlist) sendUserMsg(a Address, sendBuf []byte) error {
 		_ = conn.Close()
 	}()
 
-	bufConn := getPushPullBuffer()
-	defer releasePushPullBuffer(bufConn)
+	bufConn := bytes.NewBuffer(nil)
 	if err := bufConn.WriteByte(byte(userMsg)); err != nil {
 		return err
 	}
@@ -1095,12 +1094,7 @@ func (m *Memberlist) sendLocalState(conn net.Conn, join bool, streamLabel string
 		userData = m.config.Delegate.LocalState(join)
 	}
 
-	// Create a bytes buffer writer drawn from the push-pull pool: state
-	// can approach maxPushStateBytes (20 MiB), so reusing a large
-	// pre-grown buffer avoids the cost of growing from zero on every
-	// push-pull.
-	bufConn := getPushPullBuffer()
-	defer releasePushPullBuffer(bufConn)
+	bufConn := bytes.NewBuffer(nil)
 
 	// Send our node state
 	header := pushPullHeader{Nodes: len(localNodes), UserStateLen: len(userData), Join: join}

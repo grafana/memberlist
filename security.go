@@ -201,21 +201,12 @@ func decryptPayload(keys [][]byte, msg []byte, data []byte) ([]byte, error) {
 	return nil, fmt.Errorf("no installed keys could decrypt the message")
 }
 
+// appendBytes returns a freshly-allocated slice containing first followed
+// by second. The result never aliases either input.
+// The returned slice is non-nil even when both inputs are empty.
 func appendBytes(first []byte, second []byte) []byte {
-	hasFirst := len(first) > 0
-	hasSecond := len(second) > 0
-
-	switch {
-	case hasFirst && hasSecond:
-		out := make([]byte, 0, len(first)+len(second))
-		out = append(out, first...)
-		out = append(out, second...)
-		return out
-	case hasFirst:
-		return first
-	case hasSecond:
-		return second
-	default:
-		return nil
-	}
+	out := make([]byte, 0, len(first)+len(second))
+	out = append(out, first...)
+	out = append(out, second...)
+	return out
 }

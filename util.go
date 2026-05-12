@@ -73,10 +73,10 @@ func releaseEncodeBuffer(b *bytes.Buffer) {
 }
 
 // pushPullBufPool recycles *bytes.Buffer values used on the TCP push-pull
-// path and other large-buffer call sites. Push-pull state can approach
-// maxPushStateBytes (20 MiB), which exceeds encodeBufPool's cap policy by a
-// long way; a dedicated pool with its own ceiling lets us reuse those
-// large buffers without bloating the encode pool's idle footprint.
+// encryption path. Push-pull state can approach maxPushStateBytes, which exceeds
+// encodeBufPool's cap policy by a long way; a dedicated pool with its
+// own ceiling lets us reuse those large buffers without bloating the
+// encode pool's idle footprint.
 //
 // Pool callers MUST releasePushPullBuffer once they are done with the
 // returned buffer's bytes.
