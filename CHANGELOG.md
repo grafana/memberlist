@@ -32,6 +32,16 @@
 
 ### Changes
 
+- TCP push-pull and other TCP stream messages now skip compression when
+  the compressed output is no smaller than the input, falling back to a
+  plaintext frame. Mirrors the existing UDP packet behaviour in
+  `rawSendMsgPacket`. Receivers decode both compressed and plaintext
+  frames, so the change is wire-compatible. Two operator-visible
+  effects: incompressible TCP payloads (already-compressed, encrypted,
+  or random bytes) are no longer wrapped in a `compressMsg` frame, and
+  `memberlist_compress_skipped_total{algo,reason="size_worse_than_original"}`
+  now fires on the TCP path as well as UDP.
+
 ### Fixed
 
 ### Security
