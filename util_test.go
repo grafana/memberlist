@@ -56,6 +56,21 @@ func TestEncodeDecode(t *testing.T) {
 	}
 }
 
+// TestEncodeRoundTrip verifies repeated encode/decode calls each produce
+// independently correct bytes.
+func TestEncodeRoundTrip(t *testing.T) {
+	const inputs = 32
+	for i := range inputs {
+		buf, err := encode(pingMsg, &ping{SeqNo: uint32(i), Node: "n"}, false)
+		require.NoError(t, err)
+		require.Greater(t, len(buf), 0)
+
+		var p ping
+		require.NoError(t, decode(buf[1:], &p))
+		require.Equal(t, uint32(i), p.SeqNo)
+	}
+}
+
 func TestRandomOffset(t *testing.T) {
 	vals := make(map[int]struct{})
 	for i := 0; i < 100; i++ {
@@ -673,4 +688,77 @@ func BenchmarkKRandomNodes(b *testing.B) {
 			kRandomNodes(3, nodes, delegate, excludeFunc)
 		}
 	})
+}
+
+// TestPushPullBuffer_Reused asserts the push-pull pool actually pools —
+// i.e., steady-state Get/Release cycles don't allocate. A regression that
+// drops the pool path entirely (e.g., always returning new(bytes.Buffer))
+// would cause one alloc per iteration and fail this test.
+//
+// sync.Pool may drop entries on GC, so we measure averaged allocations
+// across many iterations and tolerate a small upper bound.
+func TestPushPullBuffer_Reused(t *testing.T) {
+	allocs := testing.AllocsPerRun(1000, func() {
+		b := getPushPullBuffer()
+		b.WriteString("hello")
+		releasePushPullBuffer(b)
+	})
+	require.Less(t, allocs, 0.5, "expected push-pull pool to amortize allocations to ~0/op")
+}
+
+// TestReleasePushPullBuffer_BoundedCap is the push-pull-pool counterpart
+// of TestReleaseLZWBuffer_BoundedCap.
+func TestReleasePushPullBuffer_BoundedCap(t *testing.T) {
+	big := getPushPullBuffer()
+	big.Write(make([]byte, maxPooledPushPullBufCap+1))
+	require.Greater(t, big.Cap(), maxPooledPushPullBufCap)
+
+	releasePushPullBuffer(big)
+	for i := range 10 {
+		b := getPushPullBuffer()
+		require.LessOrEqual(t, b.Cap(), maxPooledPushPullBufCap,
+			"oversized buffer leaked through push-pull pool on iteration %d", i)
+		releasePushPullBuffer(b)
+	}
+}
+
+// BenchmarkEncode isolates the encode() path (msgpack only, no
+// compression).
+func BenchmarkEncode(b *testing.B) {
+	sizes := []int{64, 256, 1500, 16 * 1024}
+	assertBenchSizes(b, sizes)
+	for _, c := range benchCorpora() {
+		for _, size := range sizes {
+			b.Run(fmt.Sprintf("%s/%d", c.name, size), func(b *testing.B) {
+				payload := &compressedPayload{Algo: lzwCompressionType, Buf: c.payload[:size]}
+				b.ResetTimer()
+				b.ReportAllocs()
+				for b.Loop() {
+					_, err := encode(compressMsg, payload, false)
+					require.NoError(b, err)
+				}
+			})
+		}
+	}
+}
+
+// BenchmarkMakeCompoundMessage measures the compound-message hot path,
+// which sits behind every gossip-piggyback send.
+func BenchmarkMakeCompoundMessage(b *testing.B) {
+	sizes := []int{64, 256, 1500}
+	counts := []int{1, 8, 64}
+	for _, sz := range sizes {
+		for _, n := range counts {
+			msgs := make([][]byte, n)
+			for i := range msgs {
+				msgs[i] = randBytes(sz)
+			}
+			b.Run(fmt.Sprintf("%d-msgs-of-%d", n, sz), func(b *testing.B) {
+				b.ReportAllocs()
+				for b.Loop() {
+					_ = makeCompoundMessage(msgs)
+				}
+			})
+		}
+	}
 }

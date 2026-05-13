@@ -26,9 +26,9 @@ const (
 	CompressionAlgorithmSnappy CompressionAlgorithm = "snappy"
 )
 
-// resolveCompressionAlgorithm maps algo to the wire-level compressionType byte. Empty string is treated
+// resolveCompressionType maps algo to the wire-level compressionType byte. Empty string is treated
 // as LZW for backward compatibility with bare Config{} construction.
-func resolveCompressionAlgorithm(algo CompressionAlgorithm) (compressionType, error) {
+func resolveCompressionType(algo CompressionAlgorithm) (compressionType, error) {
 	switch algo {
 	case "", CompressionAlgorithmLZW:
 		return lzwCompressionType, nil
@@ -62,12 +62,12 @@ type compressedPayload struct {
 }
 
 // compressPayload takes an opaque input buffer, compresses it using the
-// requested algo, and wraps the result in a compressedPayload encoded
+// requested compressionType, and wraps the result in a compressedPayload encoded
 // as a compressMsg frame. Returns a freshly-allocated byte slice owned
 // by the caller. On error a nil slice is returned.
-func compressPayload(algo compressionType, inp []byte, msgpackUseNewTimeFormat bool) ([]byte, error) {
+func compressPayload(typ compressionType, inp []byte, msgpackUseNewTimeFormat bool) ([]byte, error) {
 	var encoded []byte
-	switch algo {
+	switch typ {
 	case lzwCompressionType:
 		buf, err := lzwCompress(inp)
 		if err != nil {
@@ -80,21 +80,21 @@ func compressPayload(algo compressionType, inp []byte, msgpackUseNewTimeFormat b
 		defer releaseSnappyEncodeBuffer(bufPtr)
 		encoded = *bufPtr
 	default:
-		return nil, fmt.Errorf("memberlist: cannot compress with unknown algorithm %d", algo)
+		return nil, fmt.Errorf("memberlist: cannot compress with unknown algorithm %d", typ)
 	}
 
 	// Encoded compressedPayload size is len(encoded) plus a small,
 	// bounded msgpack overhead for the 2-field struct header (algo +
 	// length-prefixed Buf). 16 B headroom covers it.
-	return encodeWithSizeHint(compressMsg, &compressedPayload{Algo: algo, Buf: encoded}, msgpackUseNewTimeFormat, len(encoded)+16)
+	return encodeWithSizeHint(compressMsg, &compressedPayload{Algo: typ, Buf: encoded}, msgpackUseNewTimeFormat, len(encoded)+16)
 }
 
 // decompressPayload unpacks an encoded compressedPayload and returns the
-// algorithm used along with its uncompressed payload. The returned slice is
+// compressionType used along with its uncompressed payload. The returned slice is
 // freshly allocated and may be retained by the caller.
 //
 // On wrapper-decode failure (the compressedPayload itself is malformed) the
-// returned algo is unknownCompressionType.
+// returned compressionType is unknownCompressionType.
 func decompressPayload(msg []byte) (compressionType, []byte, error) {
 	var c compressedPayload
 	if err := decode(msg, &c); err != nil {
@@ -104,9 +104,8 @@ func decompressPayload(msg []byte) (compressionType, []byte, error) {
 	return c.Algo, payload, err
 }
 
-// decompressBuffer decompresses the buffer of a single compressedPayload,
-// dispatching on the algorithm tag. The returned slice is freshly allocated
-// and may be retained by the caller.
+// decompressBuffer decompresses the buffer of a single compressedPayload.
+// The returned slice is freshly allocated and may be retained by the caller.
 func decompressBuffer(c *compressedPayload) ([]byte, error) {
 	switch c.Algo {
 	case lzwCompressionType:
@@ -139,9 +138,9 @@ var (
 	metricDecompressErrors   = []string{"memberlist", "decompress", "errors_total"}
 )
 
-// compressionTypeLabel converts algo to a stable string for use as a metric label.
-func compressionTypeLabel(algo compressionType) string {
-	switch algo {
+// compressionTypeLabel converts typ to a stable string for use as a metric label.
+func compressionTypeLabel(typ compressionType) string {
+	switch typ {
 	case lzwCompressionType:
 		return "lzw"
 	case snappyCompressionType:
@@ -166,7 +165,7 @@ func withMetricLabel(base []metrics.Label, name, value string) []metrics.Label {
 // construction; the resulting slices are read concurrently from the send
 // and receive paths and never mutated thereafter.
 func (m *Memberlist) initCompressionMetricLabels() {
-	m.compressMetricLabels = withMetricLabel(m.metricLabels, "algo", compressionTypeLabel(m.compressionAlgo))
+	m.compressMetricLabels = withMetricLabel(m.metricLabels, "algo", compressionTypeLabel(m.compressionType))
 	m.compressSkippedSizeWorseLabels = withMetricLabel(m.compressMetricLabels, "reason", "size_worse_than_original")
 	m.decompressLZWLabels = withMetricLabel(m.metricLabels, "algo", compressionTypeLabel(lzwCompressionType))
 	m.decompressSnappyLabels = withMetricLabel(m.metricLabels, "algo", compressionTypeLabel(snappyCompressionType))

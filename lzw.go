@@ -48,12 +48,12 @@ func releaseLZWBuffer(b *bytes.Buffer) {
 }
 
 // lzwReaderInitSrc is a shared, never-mutated *bytes.Reader handed to
-// lzw.NewReader inside the lzwReaderPool New function as a placeholder.
+// lzw.NewReader inside the lzwReaderPool.New function as a placeholder.
 // Callers MUST Reset the returned lzw.Reader before any Read; this
 // invariant is what makes the shared placeholder safe across goroutines.
 var lzwReaderInitSrc = bytes.NewReader(nil)
 
-// lzwWriterPool recycles compress/lzw encoder state machines.
+// lzwWriterPool recycles lzw encoder state machines.
 // (*lzw.Writer).Reset zeros the entire internal struct (*w = Writer{}) and
 // re-inits, so the errClosed state set by our post-use Close is cleared on
 // the next Reset before any other call. We rely on this Reset-zeros-all-state
@@ -64,7 +64,7 @@ var lzwWriterPool = sync.Pool{
 	},
 }
 
-// lzwReaderPool recycles compress/lzw decoder state machines.
+// lzwReaderPool recycles lzw decoder state machines.
 // Same Reset-zeros-all-state assumption as lzwWriterPool.
 var lzwReaderPool = sync.Pool{
 	New: func() any {
@@ -133,5 +133,12 @@ func lzwDecompress(src []byte) ([]byte, error) {
 	if buf.Len() > maxDecompressBytes {
 		return nil, fmt.Errorf("memberlist: LZW-decompressed payload exceeds %d bytes", maxDecompressBytes)
 	}
+	// Clone tightens the returned slice. io.Copy filled buf via growth-
+	// doubling, so buf.Bytes() typically has 25-50 % unused capacity that
+	// would otherwise stay attached to the returned slice for as long as
+	// the caller holds it. LZW can't pre-size (decoded length isn't
+	// carried in the wire format), so Clone-after-decode is the cheapest
+	// route to a tight return. Contrast snappyDecompress, where
+	// snappy.DecodedLen lets us make([]byte, n) up front.
 	return bytes.Clone(buf.Bytes()), nil
 }

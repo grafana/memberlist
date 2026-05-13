@@ -85,13 +85,13 @@ type Memberlist struct {
 	// metricLabels is the slice of labels to put on all emitted metrics
 	metricLabels []metrics.Label
 
-	// compressionAlgo is the wire-level algorithm tag derived from
+	// compressionType is the wire-level algorithm tag derived from
 	// config.CompressionAlgorithm at construction time. Cached here so
 	// per-message send paths avoid string parsing.
-	compressionAlgo compressionType
+	compressionType compressionType
 
 	// compressMetricLabels is metricLabels + an "algo" label set to the
-	// configured compressionAlgo. Precomputed at construction so the
+	// configured compressionType. Precomputed at construction so the
 	// per-send compress hot path can pass it directly to
 	// metrics.IncrCounterWithLabels without rebuilding the slice on each
 	// call.
@@ -160,7 +160,7 @@ func newMemberlist(conf *Config) (*Memberlist, error) {
 		logger = log.New(logDest, "", log.LstdFlags)
 	}
 
-	algo, err := resolveCompressionAlgorithm(conf.CompressionAlgorithm)
+	typ, err := resolveCompressionType(conf.CompressionAlgorithm)
 	if err != nil {
 		return nil, err
 	}
@@ -249,7 +249,7 @@ func newMemberlist(conf *Config) (*Memberlist, error) {
 		broadcasts:           &TransmitLimitedQueue{RetransmitMult: conf.RetransmitMult},
 		logger:               logger,
 		metricLabels:         conf.MetricLabels,
-		compressionAlgo:      algo,
+		compressionType:      typ,
 	}
 	m.initCompressionMetricLabels()
 	m.broadcasts.NumNodes = func() int {

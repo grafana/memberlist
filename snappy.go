@@ -62,7 +62,5 @@ func snappyDecompress(src []byte) ([]byte, error) {
 	if n > maxDecompressBytes {
 		return nil, fmt.Errorf("memberlist: snappy-decompressed payload would exceed %d bytes (claimed %d)", maxDecompressBytes, n)
 	}
-	// Pooling the buffer would force a copy-out (the caller retains
-	// the slice indefinitely) and add net overhead.
 	return snappy.Decode(make([]byte, n), src)
 }

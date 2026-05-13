@@ -866,7 +866,7 @@ func TestRawSendUdp_CRC(t *testing.T) {
 // fallback semantics in rawSendMsgPacket: when compressPayload returns
 // an error, the original plaintext is sent unchanged so peers can still
 // decode it. Production code never reaches this state in practice
-// (resolveCompressionAlgorithm catches invalid configs at construction);
+// (resolveCompressionType catches invalid configs at construction);
 // this test pins the fallback shape against future bugs that might
 // introduce such a state.
 func TestRawSendMsgPacket_CompressErrorFallsBackToPlaintext(t *testing.T) {
@@ -879,7 +879,7 @@ func TestRawSendMsgPacket_CompressErrorFallsBackToPlaintext(t *testing.T) {
 
 	// Build a minimal Memberlist with just the bits rawSendMsgPacket
 	// needs. Skipping Create avoids spawning the gossip/listen goroutines
-	// that read m.compressionAlgo concurrently — production treats that
+	// that read m.compressionType concurrently — production treats that
 	// field as set-once-at-construction, so mutating it post-Create
 	// would race even if the race detector hasn't caught it under the
 	// quiet test workload.
@@ -890,7 +890,7 @@ func TestRawSendMsgPacket_CompressErrorFallsBackToPlaintext(t *testing.T) {
 		nodeMap:   make(map[string]*NodeState),
 	}
 	m.initCompressionMetricLabels()
-	m.compressionAlgo = compressionType(99)
+	m.compressionType = compressionType(99)
 
 	payload := []byte{0x01, 0x02, 0x03, 0x04, 0x05}
 	a := Address{Addr: receiverT.addr.String(), Name: "receiver"}
@@ -1114,4 +1114,36 @@ func (c *errorReadNetConn) Read(b []byte) (n int, err error) {
 func (c *errorReadNetConn) Close() error {
 	close(c.closed)
 	return nil
+}
+
+// BenchmarkEncryptLocalState measures the TCP push-pull encryption
+// path. Sized to span the small (single-node gossip ack) through medium
+// and large (push-pull-state) cases.
+func BenchmarkEncryptLocalState(b *testing.B) {
+	keyring, err := NewKeyring(nil, TestKeys[0])
+	require.NoError(b, err)
+
+	conf := DefaultLANConfig()
+	conf.Keyring = keyring
+	conf.GossipVerifyOutgoing = true
+
+	// Build a minimal Memberlist with the bits encryptLocalState needs;
+	// avoiding newMemberlist here keeps the bench setup independent of
+	// network transport availability. initCompressionMetricLabels is
+	// called so the bench remains valid if encryptLocalState ever gains
+	// metric instrumentation that reads the precomputed label slices.
+	m := &Memberlist{config: conf}
+	m.initCompressionMetricLabels()
+
+	sizes := []int{1024, 64 * 1024, 1 << 20} // 1 KiB, 64 KiB, 1 MiB
+	for _, sz := range sizes {
+		sendBuf := randBytes(sz)
+		b.Run(fmt.Sprintf("%d", sz), func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				_, err := m.encryptLocalState(sendBuf, "")
+				require.NoError(b, err)
+			}
+		})
+	}
 }

@@ -18,20 +18,19 @@ import (
 )
 
 func TestCompressDecompress(t *testing.T) {
-	t.Run("RoundTrip", func(t *testing.T) {
-		algos := []compressionType{lzwCompressionType, snappyCompressionType}
+	t.Run("roundtrip", func(t *testing.T) {
+		types := []compressionType{lzwCompressionType, snappyCompressionType}
 		sizes := []int{0, 1, 100, 100 * 1024, 1024 * 1024}
-
-		for _, algo := range algos {
+		for _, typ := range types {
 			for _, size := range sizes {
-				t.Run(fmt.Sprintf("%s/%d", compressionTypeLabel(algo), size), func(t *testing.T) {
+				t.Run(fmt.Sprintf("%s/%d", compressionTypeLabel(typ), size), func(t *testing.T) {
 					input := randBytes(size)
-					buf, err := compressPayload(algo, input, false)
+					buf, err := compressPayload(typ, input, false)
 					require.NoError(t, err)
 
-					gotAlgo, decoded, err := decompressPayload(buf[1:])
+					gotType, decoded, err := decompressPayload(buf[1:])
 					require.NoError(t, err)
-					require.Equal(t, algo, gotAlgo)
+					require.Equal(t, typ, gotType)
 					require.Equal(t, input, decoded)
 				})
 			}
@@ -41,26 +40,26 @@ func TestCompressDecompress(t *testing.T) {
 	// Lock down the rollout invariant: receivers MUST
 	// decode every algorithm they understand, regardless of which algorithm
 	// they would emit themselves.
-	t.Run("MixedCodecReceiver", func(t *testing.T) {
-		for _, senderAlgo := range []compressionType{lzwCompressionType, snappyCompressionType} {
-			t.Run(compressionTypeLabel(senderAlgo), func(t *testing.T) {
+	t.Run("mixed codec receiver", func(t *testing.T) {
+		for _, senderType := range []compressionType{lzwCompressionType, snappyCompressionType} {
+			t.Run(compressionTypeLabel(senderType), func(t *testing.T) {
 				input := []byte("the quick brown fox jumps over the lazy dog")
-				buf, err := compressPayload(senderAlgo, input, false)
+				buf, err := compressPayload(senderType, input, false)
 				require.NoError(t, err)
 
 				// The receiver dispatches off the on-wire algo tag, never off
 				// any local config — exercise both code paths via decompressPayload.
-				gotAlgo, decoded, err := decompressPayload(buf[1:])
+				gotType, decoded, err := decompressPayload(buf[1:])
 				require.NoError(t, err)
-				require.Equal(t, senderAlgo, gotAlgo)
+				require.Equal(t, senderType, gotType)
 				require.Equal(t, input, decoded)
 			})
 		}
 	})
 
-	t.Run("ConcurrentRace", func(t *testing.T) {
+	t.Run("concurrent race", func(t *testing.T) {
 		const iterations = 200
-		algos := []compressionType{lzwCompressionType, snappyCompressionType}
+		types := []compressionType{lzwCompressionType, snappyCompressionType}
 
 		var wg sync.WaitGroup
 		for w := range 8 {
@@ -69,17 +68,17 @@ func TestCompressDecompress(t *testing.T) {
 				defer wg.Done()
 				rng := rand.New(rand.NewSource(seed))
 				for range iterations {
-					algo := algos[rng.Intn(len(algos))]
+					typ := types[rng.Intn(len(types))]
 					input := randBytesWith(rng, rng.Intn(2048))
-					buf, err := compressPayload(algo, input, false)
+					buf, err := compressPayload(typ, input, false)
 					if !assert.NoError(t, err) {
 						return
 					}
-					gotAlgo, decoded, err := decompressPayload(buf[1:])
+					gotType, decoded, err := decompressPayload(buf[1:])
 					if !assert.NoError(t, err) {
 						return
 					}
-					if !assert.Equal(t, algo, gotAlgo) {
+					if !assert.Equal(t, typ, gotType) {
 						return
 					}
 					if !assert.True(t, bytes.Equal(decoded, input), "payload mismatch") {
@@ -95,19 +94,19 @@ func TestCompressDecompress(t *testing.T) {
 	// decompressed result must equal the short input exactly, with no
 	// leftover bytes from the long one. Catches Reset/Put-side hygiene bugs
 	// in the LZW writer/reader pools and the snappy buffer pools.
-	t.Run("PoolResetHygiene", func(t *testing.T) {
-		for _, algo := range []compressionType{lzwCompressionType, snappyCompressionType} {
-			t.Run(compressionTypeLabel(algo), func(t *testing.T) {
+	t.Run("pool reset hygiene", func(t *testing.T) {
+		for _, typ := range []compressionType{lzwCompressionType, snappyCompressionType} {
+			t.Run(compressionTypeLabel(typ), func(t *testing.T) {
 				long := bytes.Repeat([]byte("A"), 16*1024)
 				short := []byte("BB")
 
-				bufLong, err := compressPayload(algo, long, false)
+				bufLong, err := compressPayload(typ, long, false)
 				require.NoError(t, err)
 				_, decLong, err := decompressPayload(bufLong[1:])
 				require.NoError(t, err)
 				require.Equal(t, long, decLong)
 
-				bufShort, err := compressPayload(algo, short, false)
+				bufShort, err := compressPayload(typ, short, false)
 				require.NoError(t, err)
 				_, decShort, err := decompressPayload(bufShort[1:])
 				require.NoError(t, err)
@@ -122,19 +121,19 @@ func TestCompressDecompress(t *testing.T) {
 	// return. A regression that returned pool memory would let the
 	// churn loop overwrite buf's underlying array, breaking the
 	// snapshot equality.
-	t.Run("DoesNotRetainScratch", func(t *testing.T) {
-		for _, algo := range []compressionType{lzwCompressionType, snappyCompressionType} {
-			t.Run(compressionTypeLabel(algo), func(t *testing.T) {
+	t.Run("does not retain scratch", func(t *testing.T) {
+		for _, typ := range []compressionType{lzwCompressionType, snappyCompressionType} {
+			t.Run(compressionTypeLabel(typ), func(t *testing.T) {
 				input := bytes.Repeat([]byte("xy"), 512)
-				buf, err := compressPayload(algo, input, false)
+				buf, err := compressPayload(typ, input, false)
 				require.NoError(t, err)
-				snapshot := append([]byte(nil), buf...)
+				snapshot := bytes.Clone(buf)
 
 				// Force pool churn: do several more encodes of different bytes.
 				// If compressPayload retained any reference into pooled scratch,
 				// the snapshot would diverge from buf.
 				for range 5 {
-					_, err := compressPayload(algo, []byte(strings.Repeat("z", 1024)), false)
+					_, err := compressPayload(typ, []byte(strings.Repeat("z", 1024)), false)
 					require.NoError(t, err)
 				}
 
@@ -144,64 +143,11 @@ func TestCompressDecompress(t *testing.T) {
 	})
 }
 
-// TestReleaseLZWBuffer_BoundedCap verifies the LZW scratch pool drops
-// oversized buffers rather than retaining them forever.
-func TestReleaseLZWBuffer_BoundedCap(t *testing.T) {
-	big := getLZWBuffer()
-	big.Write(make([]byte, maxPooledLZWBufferCap+1))
-	require.Greater(t, big.Cap(), maxPooledLZWBufferCap)
-
-	releaseLZWBuffer(big)
-	// We can't directly assert the pool's contents (sync.Pool's interface
-	// permits the runtime to drop entries on its own), but we can assert
-	// that getLZWBuffer() never returns a buffer with cap > limit unless one
-	// was explicitly retained — release of an oversized buffer must not
-	// re-surface here.
-	for i := range 10 {
-		b := getLZWBuffer()
-		require.LessOrEqual(t, b.Cap(), maxPooledLZWBufferCap,
-			"oversized buffer leaked through pool on iteration %d", i)
-		releaseLZWBuffer(b)
-	}
-}
-
-// TestPushPullBuffer_Reused asserts the push-pull pool actually pools —
-// i.e., steady-state Get/Release cycles don't allocate. A regression that
-// drops the pool path entirely (e.g., always returning new(bytes.Buffer))
-// would cause one alloc per iteration and fail this test.
-//
-// sync.Pool may drop entries on GC, so we measure averaged allocations
-// across many iterations and tolerate a small upper bound.
-func TestPushPullBuffer_Reused(t *testing.T) {
-	allocs := testing.AllocsPerRun(1000, func() {
-		b := getPushPullBuffer()
-		b.WriteString("hello")
-		releasePushPullBuffer(b)
-	})
-	require.Less(t, allocs, 0.5, "expected push-pull pool to amortize allocations to ~0/op")
-}
-
-// TestReleasePushPullBuffer_BoundedCap is the push-pull-pool counterpart
-// of TestReleaseLZWBuffer_BoundedCap.
-func TestReleasePushPullBuffer_BoundedCap(t *testing.T) {
-	big := getPushPullBuffer()
-	big.Write(make([]byte, maxPooledPushPullBufCap+1))
-	require.Greater(t, big.Cap(), maxPooledPushPullBufCap)
-
-	releasePushPullBuffer(big)
-	for i := range 10 {
-		b := getPushPullBuffer()
-		require.LessOrEqual(t, b.Cap(), maxPooledPushPullBufCap,
-			"oversized buffer leaked through push-pull pool on iteration %d", i)
-		releasePushPullBuffer(b)
-	}
-}
-
 func TestMemberlist_initCompressionMetricLabels(t *testing.T) {
 	base := []metrics.Label{{Name: "cluster", Value: "test"}}
 	m := &Memberlist{
 		metricLabels:    base,
-		compressionAlgo: snappyCompressionType,
+		compressionType: snappyCompressionType,
 	}
 	m.initCompressionMetricLabels()
 
@@ -253,7 +199,7 @@ func TestMemberlist_initCompressionMetricLabels(t *testing.T) {
 // bomb-defense caps, wrapper-frame decode failure, and the unknown-algo
 // dispatch in decompressBuffer.
 func TestDecompressErrors(t *testing.T) {
-	t.Run("ExceedsCap", func(t *testing.T) {
+	t.Run("exceeds cap", func(t *testing.T) {
 		// Compress a plaintext that decompresses just past the cap and
 		// assert the decoder refuses to return more than the limit. LZW
 		// on a stream of identical bytes achieves ~1000:1 compression,
@@ -290,19 +236,19 @@ func TestDecompressErrors(t *testing.T) {
 
 	// Lock down the contract that makes the decompress error metric
 	// labelable: when the outer compressedPayload itself can't be
-	// msgpack-decoded, decompressPayload returns unknownCompressionType (255) so
+	// msgpack-decoded, decompressPayload returns unknownCompressionType so
 	// the caller's compressionTypeLabel maps to "unknown" rather than the lzwCompressionType
 	// zero value.
-	t.Run("WrapperDecodeError", func(t *testing.T) {
-		algo, _, err := decompressPayload([]byte{0xff, 0xff, 0xff, 0xff})
+	t.Run("wrapper decode error", func(t *testing.T) {
+		gotType, _, err := decompressPayload([]byte{0xff, 0xff, 0xff, 0xff})
 		require.ErrorContains(t, err, "msgpack decode error")
-		require.Equal(t, unknownCompressionType, algo)
-		require.Equal(t, "unknown", compressionTypeLabel(algo))
+		require.Equal(t, unknownCompressionType, gotType)
+		require.Equal(t, "unknown", compressionTypeLabel(gotType))
 	})
 
-	t.Run("UnknownAlgorithm", func(t *testing.T) {
-		c := &compressedPayload{Algo: 99, Buf: nil}
-		_, err := decompressBuffer(c)
+	t.Run("unknown algorithm", func(t *testing.T) {
+		c := compressedPayload{Algo: 99, Buf: nil}
+		_, err := decompressBuffer(&c)
 		require.EqualError(t, err, "cannot decompress unknown algorithm 99")
 	})
 }
@@ -325,45 +271,30 @@ func TestCompressPayload_UnknownAlgo(t *testing.T) {
 // the per-algorithm dispatch is caught.
 func TestDecompressBuffer_MalformedBody(t *testing.T) {
 	for _, tc := range []struct {
-		algo        compressionType
+		typ         compressionType
 		errContains string
 	}{
-		{lzwCompressionType, "lzwDecompress"},
+		{lzwCompressionType, "lzw"},
 		{snappyCompressionType, "snappy"},
 	} {
-		t.Run(compressionTypeLabel(tc.algo), func(t *testing.T) {
+		t.Run(compressionTypeLabel(tc.typ), func(t *testing.T) {
 			t.Run("garbage", func(t *testing.T) {
 				garbage := bytes.Repeat([]byte{0xff}, 32)
-				_, err := decompressBuffer(&compressedPayload{Algo: tc.algo, Buf: garbage})
+				_, err := decompressBuffer(&compressedPayload{Algo: tc.typ, Buf: garbage})
 				require.ErrorContains(t, err, tc.errContains)
 			})
 
 			t.Run("truncated", func(t *testing.T) {
 				input := bytes.Repeat([]byte("the quick brown fox "), 100)
-				wrapped, err := compressPayload(tc.algo, input, false)
+				wrapped, err := compressPayload(tc.typ, input, false)
 				require.NoError(t, err)
 				var c compressedPayload
 				require.NoError(t, decode(wrapped[1:], &c))
 
-				_, err = decompressBuffer(&compressedPayload{Algo: tc.algo, Buf: c.Buf[:len(c.Buf)/2]})
+				_, err = decompressBuffer(&compressedPayload{Algo: tc.typ, Buf: c.Buf[:len(c.Buf)/2]})
 				require.ErrorContains(t, err, tc.errContains)
 			})
 		})
-	}
-}
-
-// TestEncodeRoundTrip verifies repeated encode/decode calls each produce
-// independently correct bytes.
-func TestEncodeRoundTrip(t *testing.T) {
-	const inputs = 32
-	for i := range inputs {
-		buf, err := encode(pingMsg, &ping{SeqNo: uint32(i), Node: "n"}, false)
-		require.NoError(t, err)
-		require.Greater(t, len(buf), 0)
-
-		var p ping
-		require.NoError(t, decode(buf[1:], &p))
-		require.Equal(t, uint32(i), p.SeqNo)
 	}
 }
 
@@ -373,7 +304,7 @@ func TestEncodeRoundTrip(t *testing.T) {
 // invariant that receivers MUST decode every algorithm regardless of
 // their own emit setting.
 func TestMemberlistCompression(t *testing.T) {
-	t.Run("SnappyOnly", func(t *testing.T) {
+	t.Run("snappy only", func(t *testing.T) {
 		c1 := testConfig(t)
 		c1.EnableCompression = true
 		c1.CompressionAlgorithm = CompressionAlgorithmSnappy
@@ -395,7 +326,7 @@ func TestMemberlistCompression(t *testing.T) {
 		require.Equal(t, 2, len(m2.Members()))
 	})
 
-	t.Run("MixedRollout", func(t *testing.T) {
+	t.Run("mixed rollout", func(t *testing.T) {
 		c1 := testConfig(t)
 		c1.EnableCompression = true
 		c1.CompressionAlgorithm = CompressionAlgorithmSnappy
@@ -485,38 +416,18 @@ func BenchmarkCompressPayload(b *testing.B) {
 	sizes := []int{64, 256, 1500, 16 * 1024}
 	assertBenchSizes(b, sizes)
 	for _, c := range benchCorpora() {
-		for _, algo := range []compressionType{lzwCompressionType, snappyCompressionType} {
+		for _, typ := range []compressionType{lzwCompressionType, snappyCompressionType} {
 			for _, size := range sizes {
-				b.Run(fmt.Sprintf("%s/%s/%d", c.name, compressionTypeLabel(algo), size), func(b *testing.B) {
+				b.Run(fmt.Sprintf("%s/%s/%d", c.name, compressionTypeLabel(typ), size), func(b *testing.B) {
 					src := c.payload[:size]
 					b.ResetTimer()
 					b.ReportAllocs()
 					for b.Loop() {
-						_, err := compressPayload(algo, src, false)
+						_, err := compressPayload(typ, src, false)
 						require.NoError(b, err)
 					}
 				})
 			}
-		}
-	}
-}
-
-// BenchmarkEncode isolates the encode() path (msgpack only, no
-// compression).
-func BenchmarkEncode(b *testing.B) {
-	sizes := []int{64, 256, 1500, 16 * 1024}
-	assertBenchSizes(b, sizes)
-	for _, c := range benchCorpora() {
-		for _, size := range sizes {
-			b.Run(fmt.Sprintf("%s/%d", c.name, size), func(b *testing.B) {
-				payload := &compressedPayload{Algo: lzwCompressionType, Buf: c.payload[:size]}
-				b.ResetTimer()
-				b.ReportAllocs()
-				for b.Loop() {
-					_, err := encode(compressMsg, payload, false)
-					require.NoError(b, err)
-				}
-			})
 		}
 	}
 }
@@ -528,11 +439,11 @@ func BenchmarkDecompressBuffer(b *testing.B) {
 	sizes := []int{64, 256, 1500, 16 * 1024}
 	assertBenchSizes(b, sizes)
 	for _, c := range benchCorpora() {
-		for _, algo := range []compressionType{lzwCompressionType, snappyCompressionType} {
+		for _, typ := range []compressionType{lzwCompressionType, snappyCompressionType} {
 			for _, size := range sizes {
-				b.Run(fmt.Sprintf("%s/%s/%d", c.name, compressionTypeLabel(algo), size), func(b *testing.B) {
+				b.Run(fmt.Sprintf("%s/%s/%d", c.name, compressionTypeLabel(typ), size), func(b *testing.B) {
 					src := c.payload[:size]
-					wrapped, err := compressPayload(algo, src, false)
+					wrapped, err := compressPayload(typ, src, false)
 					require.NoError(b, err)
 					var compressed compressedPayload
 					require.NoError(b, decode(wrapped[1:], &compressed))
@@ -549,59 +460,6 @@ func BenchmarkDecompressBuffer(b *testing.B) {
 	}
 }
 
-// BenchmarkMakeCompoundMessage measures the compound-message hot path,
-// which sits behind every gossip-piggyback send.
-func BenchmarkMakeCompoundMessage(b *testing.B) {
-	sizes := []int{64, 256, 1500}
-	counts := []int{1, 8, 64}
-	for _, sz := range sizes {
-		for _, n := range counts {
-			msgs := make([][]byte, n)
-			for i := range msgs {
-				msgs[i] = randBytes(sz)
-			}
-			b.Run(fmt.Sprintf("%d-msgs-of-%d", n, sz), func(b *testing.B) {
-				b.ReportAllocs()
-				for b.Loop() {
-					_ = makeCompoundMessage(msgs)
-				}
-			})
-		}
-	}
-}
-
-// BenchmarkEncryptLocalState measures the TCP push-pull encryption
-// path. Sized to span the small (single-node gossip ack) through medium
-// and large (push-pull-state) cases.
-func BenchmarkEncryptLocalState(b *testing.B) {
-	keyring, err := NewKeyring(nil, TestKeys[0])
-	require.NoError(b, err)
-
-	conf := DefaultLANConfig()
-	conf.Keyring = keyring
-	conf.GossipVerifyOutgoing = true
-
-	// Build a minimal Memberlist with the bits encryptLocalState needs;
-	// avoiding newMemberlist here keeps the bench setup independent of
-	// network transport availability. initCompressionMetricLabels is
-	// called so the bench remains valid if encryptLocalState ever gains
-	// metric instrumentation that reads the precomputed label slices.
-	m := &Memberlist{config: conf}
-	m.initCompressionMetricLabels()
-
-	sizes := []int{1024, 64 * 1024, 1 << 20} // 1 KiB, 64 KiB, 1 MiB
-	for _, sz := range sizes {
-		sendBuf := randBytes(sz)
-		b.Run(fmt.Sprintf("%d", sz), func(b *testing.B) {
-			b.ReportAllocs()
-			for b.Loop() {
-				_, err := m.encryptLocalState(sendBuf, "")
-				require.NoError(b, err)
-			}
-		})
-	}
-}
-
 // FuzzCompressDecompressRoundTrip exercises every supported algorithm with
 // arbitrary inputs and asserts the decompressed payload byte-equals the input.
 // Catches regressions in dispatch, pool reset hygiene, and snappy/LZW glue.
@@ -610,14 +468,14 @@ func FuzzCompressDecompressRoundTrip(f *testing.F) {
 	f.Add([]byte("testing"))
 	f.Add(bytes.Repeat([]byte("ab"), 1024))
 	f.Fuzz(func(t *testing.T, src []byte) {
-		for _, algo := range []compressionType{lzwCompressionType, snappyCompressionType} {
-			buf, err := compressPayload(algo, src, false)
-			require.NoError(t, err, fmt.Sprintf("compress %s: %v", compressionTypeLabel(algo), err))
-			gotAlgo, decoded, err := decompressPayload(buf[1:])
-			require.NoError(t, err, fmt.Sprintf("decompress %s: %v", compressionTypeLabel(algo), err))
-			require.Equal(t, algo, gotAlgo)
-			require.True(t, bytes.Equal(decoded, src), fmt.Sprintf("payload mismatch (algo %s): got %q want %q",
-				compressionTypeLabel(algo), decoded, src))
+		for _, typ := range []compressionType{lzwCompressionType, snappyCompressionType} {
+			buf, err := compressPayload(typ, src, false)
+			require.NoError(t, err, fmt.Sprintf("compress %s: %v", compressionTypeLabel(typ), err))
+			gotType, decoded, err := decompressPayload(buf[1:])
+			require.NoError(t, err, fmt.Sprintf("decompress %s: %v", compressionTypeLabel(typ), err))
+			require.Equal(t, typ, gotType)
+			require.True(t, bytes.Equal(decoded, src), fmt.Sprintf("payload mismatch (type %s): got %q want %q",
+				compressionTypeLabel(typ), decoded, src))
 		}
 	})
 }

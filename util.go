@@ -261,8 +261,7 @@ func makeCompoundMessages(msgs [][]byte) [][]byte {
 
 		// Oversized message — send it alone. Copy so the caller owns
 		// the returned slice independently of the input it passed in.
-		cp := append([]byte(nil), msgs[r]...)
-		bufs = append(bufs, cp)
+		bufs = append(bufs, bytes.Clone(msgs[r]))
 		r++
 	}
 	msgs = msgs[:w]

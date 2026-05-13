@@ -407,7 +407,7 @@ func TestCreate(t *testing.T) {
 				}
 				require.NoError(t, err)
 				defer func() { require.NoError(t, m.Shutdown()) }()
-				require.Equal(t, tc.wantInternal, m.compressionAlgo)
+				require.Equal(t, tc.wantInternal, m.compressionType)
 			})
 		}
 	})
