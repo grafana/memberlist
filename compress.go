@@ -76,9 +76,7 @@ func compressPayload(typ compressionType, inp []byte, msgpackUseNewTimeFormat bo
 		defer releaseLZWBuffer(buf)
 		encoded = buf.Bytes()
 	case snappyCompressionType:
-		bufPtr := snappyCompress(inp)
-		defer releaseSnappyEncodeBuffer(bufPtr)
-		encoded = *bufPtr
+		encoded = snappyCompress(inp)
 	default:
 		return nil, fmt.Errorf("memberlist: cannot compress with unknown algorithm %d", typ)
 	}

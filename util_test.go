@@ -4,7 +4,10 @@
 package memberlist
 
 import (
+	"bytes"
+	"encoding/binary"
 	"fmt"
+	"io"
 	"reflect"
 	"testing"
 	"time"
@@ -761,4 +764,68 @@ func BenchmarkMakeCompoundMessage(b *testing.B) {
 			})
 		}
 	}
+}
+
+// BenchmarkPushPullBuffer isolates pushPullBufPool's contribution on
+// decryptRemoteState's io.CopyN staging buffer. NoPool uses a
+// function-local bytes.Buffer per call. Push-pull state can range
+// from a few KiB (single-node gossip) up to maxPushStateBytes
+// (20 MiB); the pool earns its keep on the larger sizes where
+// io.CopyN's growth-doubling does the most work.
+func BenchmarkPushPullBuffer(b *testing.B) {
+	keyring, err := NewKeyring(nil, TestKeys[0])
+	require.NoError(b, err)
+	conf := DefaultLANConfig()
+	conf.Keyring = keyring
+	conf.GossipVerifyOutgoing = true
+	m := &Memberlist{config: conf}
+	m.initCompressionMetricLabels()
+
+	for _, sz := range []int{64 * 1024, 1 << 20, 8 << 20} {
+		sendBuf := randBytes(sz)
+		envelope, err := m.encryptLocalState(sendBuf, "")
+		require.NoError(b, err)
+		// decryptRemoteState writes the encryptMsg byte into the
+		// staging buffer itself, so the input it reads from begins
+		// immediately after that byte.
+		cipherInput := envelope[1:]
+
+		b.Run(fmt.Sprintf("%d/pool", sz), func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				_, err := m.decryptRemoteState(bytes.NewReader(cipherInput), "")
+				require.NoError(b, err)
+			}
+		})
+		b.Run(fmt.Sprintf("%d/no pool", sz), func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				_, err := decryptRemoteStateNoBufPool(m, bytes.NewReader(cipherInput), "")
+				require.NoError(b, err)
+			}
+		})
+	}
+}
+
+// decryptRemoteStateNoBufPool mirrors decryptRemoteState but stages
+// cipher text in a function-local bytes.Buffer instead of via
+// pushPullBufPool. Benchmark-only — used by BenchmarkPushPullBuffer
+// to measure the pool's marginal contribution.
+func decryptRemoteStateNoBufPool(m *Memberlist, bufConn io.Reader, streamLabel string) ([]byte, error) {
+	var cipherText bytes.Buffer
+	cipherText.WriteByte(byte(encryptMsg))
+	if _, err := io.CopyN(&cipherText, bufConn, 4); err != nil {
+		return nil, err
+	}
+	moreBytes := binary.BigEndian.Uint32(cipherText.Bytes()[1:5])
+	if moreBytes > maxPushStateBytes {
+		return nil, fmt.Errorf("remote node state is larger than limit (%d)", moreBytes)
+	}
+	if _, err := io.CopyN(&cipherText, bufConn, int64(moreBytes)); err != nil {
+		return nil, err
+	}
+	dataBytes := appendBytes(cipherText.Bytes()[:5], []byte(streamLabel))
+	cipherBytes := cipherText.Bytes()[5:]
+	keys := m.config.Keyring.GetKeys()
+	return decryptPayload(keys, cipherBytes, dataBytes)
 }
