@@ -12,6 +12,7 @@ import (
 	"io"
 	"math"
 	"net"
+	"slices"
 	"sync/atomic"
 	"time"
 
@@ -1143,7 +1144,7 @@ func (m *Memberlist) encryptLocalState(sendBuf []byte, streamLabel string) ([]by
 	//
 	//   [messageType; byte] [messageLength; uint32] [stream_label; optional]
 	//
-	dataBytes := appendBytes(buf.Bytes()[:5], []byte(streamLabel))
+	dataBytes := slices.Concat(buf.Bytes()[:5], []byte(streamLabel))
 
 	// Write the encrypted cipher text to the buffer
 	key := m.config.Keyring.GetPrimaryKey()
@@ -1194,7 +1195,7 @@ func (m *Memberlist) decryptRemoteState(bufConn io.Reader, streamLabel string) (
 	//
 	//   [messageType; byte] [messageLength; uint32] [label_data; optional]
 	//
-	dataBytes := appendBytes(cipherText.Bytes()[:5], []byte(streamLabel))
+	dataBytes := slices.Concat(cipherText.Bytes()[:5], []byte(streamLabel))
 	cipherBytes := cipherText.Bytes()[5:]
 
 	// Decrypt the payload

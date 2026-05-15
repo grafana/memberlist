@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"reflect"
+	"slices"
 	"testing"
 	"time"
 
@@ -824,7 +825,7 @@ func decryptRemoteStateNoBufPool(m *Memberlist, bufConn io.Reader, streamLabel s
 	if _, err := io.CopyN(&cipherText, bufConn, int64(moreBytes)); err != nil {
 		return nil, err
 	}
-	dataBytes := appendBytes(cipherText.Bytes()[:5], []byte(streamLabel))
+	dataBytes := slices.Concat(cipherText.Bytes()[:5], []byte(streamLabel))
 	cipherBytes := cipherText.Bytes()[5:]
 	keys := m.config.Keyring.GetKeys()
 	return decryptPayload(keys, cipherBytes, dataBytes)
