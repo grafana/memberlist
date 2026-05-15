@@ -57,11 +57,11 @@ func TestHandleCompoundPing(t *testing.T) {
 	}
 
 	// Make a compound message
-	compound := makeCompoundMessage([][]byte{buf.Bytes(), buf.Bytes(), buf.Bytes()})
+	compound := makeCompoundMessage([][]byte{buf, buf, buf})
 
 	// Send compound version
 	addr := &net.UDPAddr{IP: net.ParseIP(m.config.BindAddr), Port: m.config.BindPort}
-	_, err = udp.WriteTo(compound.Bytes(), addr)
+	_, err = udp.WriteTo(compound, addr)
 	if err != nil {
 		t.Fatalf("unexpected err %s", err)
 	}
@@ -135,7 +135,7 @@ func TestHandlePing(t *testing.T) {
 
 	// Send
 	addr := &net.UDPAddr{IP: net.ParseIP(m.config.BindAddr), Port: m.config.BindPort}
-	_, err = udp.WriteTo(buf.Bytes(), addr)
+	_, err = udp.WriteTo(buf, addr)
 	if err != nil {
 		t.Fatalf("unexpected err %s", err)
 	}
@@ -208,7 +208,7 @@ func TestHandlePing_WrongNode(t *testing.T) {
 
 	// Send
 	addr := &net.UDPAddr{IP: net.ParseIP(m.config.BindAddr), Port: m.config.BindPort}
-	_, err = udp.WriteTo(buf.Bytes(), addr)
+	_, err = udp.WriteTo(buf, addr)
 	if err != nil {
 		t.Fatalf("unexpected err %s", err)
 	}
@@ -260,7 +260,7 @@ func TestHandleIndirectPing(t *testing.T) {
 
 	// Send
 	addr := &net.UDPAddr{IP: net.ParseIP(m.config.BindAddr), Port: m.config.BindPort}
-	_, err = udp.WriteTo(buf.Bytes(), addr)
+	_, err = udp.WriteTo(buf, addr)
 	if err != nil {
 		t.Fatalf("unexpected err %s", err)
 	}
@@ -377,7 +377,7 @@ func TestTCPPing(t *testing.T) {
 			return
 		}
 
-		err = m.rawSendMsgStream(conn, out.Bytes(), "")
+		err = m.rawSendMsgStream(conn, out, "")
 		if err != nil {
 			pingErrCh <- fmt.Errorf("failed to send ack: %s", err)
 			return
@@ -427,7 +427,7 @@ func TestTCPPing(t *testing.T) {
 			return
 		}
 
-		err = m.rawSendMsgStream(conn, out.Bytes(), "")
+		err = m.rawSendMsgStream(conn, out, "")
 		if err != nil {
 			pingErrCh <- fmt.Errorf("failed to send ack: %s", err)
 			return
@@ -471,7 +471,7 @@ func TestTCPPing(t *testing.T) {
 			return
 		}
 
-		err = m.rawSendMsgStream(conn, out.Bytes(), "")
+		err = m.rawSendMsgStream(conn, out, "")
 		if err != nil {
 			pingErrCh <- fmt.Errorf("failed to send bogus msg: %s", err)
 			return
@@ -586,7 +586,7 @@ func TestTCPPushPull(t *testing.T) {
 
 	// Check if we have a compressed message
 	if msgType == compressMsg {
-		var c compress
+		var c compressedPayload
 		if err := dec.Decode(&c); err != nil {
 			t.Fatalf("unexpected err %s", err)
 		}
@@ -687,7 +687,7 @@ func TestSendMsg_Piggyback(t *testing.T) {
 
 	// Send
 	addr := &net.UDPAddr{IP: net.ParseIP(m.config.BindAddr), Port: m.config.BindPort}
-	_, err = udp.WriteTo(buf.Bytes(), addr)
+	_, err = udp.WriteTo(buf, addr)
 	if err != nil {
 		t.Fatalf("unexpected err %s", err)
 	}
@@ -859,6 +859,54 @@ func TestRawSendUdp_CRC(t *testing.T) {
 
 	if len(in) != 9 {
 		t.Fatalf("bad: %v", in)
+	}
+}
+
+// TestRawSendMsgPacket_CompressErrorFallsBackToPlaintext locks down the
+// fallback semantics in rawSendMsgPacket: when compressPayload returns
+// an error, the original plaintext is sent unchanged so peers can still
+// decode it. Production code never reaches this state in practice
+// (resolveCompressionType catches invalid configs at construction);
+// this test pins the fallback shape against future bugs that might
+// introduce such a state.
+func TestRawSendMsgPacket_CompressErrorFallsBackToPlaintext(t *testing.T) {
+	mockNet := &MockNetwork{}
+	senderT := mockNet.NewTransport("sender")
+	receiverT := mockNet.NewTransport("receiver")
+
+	conf := DefaultLANConfig()
+	conf.EnableCompression = true
+
+	// Build a minimal Memberlist with just the bits rawSendMsgPacket
+	// needs. Skipping Create avoids spawning the gossip/listen goroutines
+	// that read m.compressionType concurrently — production treats that
+	// field as set-once-at-construction, so mutating it post-Create
+	// would race even if the race detector hasn't caught it under the
+	// quiet test workload.
+	m := &Memberlist{
+		config:    conf,
+		transport: senderT,
+		logger:    log.New(io.Discard, "", 0),
+		nodeMap:   make(map[string]*NodeState),
+	}
+	m.initCompressionMetricLabels()
+	m.compressionType = compressionType(99)
+
+	payload := []byte{0x01, 0x02, 0x03, 0x04, 0x05}
+	a := Address{Addr: receiverT.addr.String(), Name: "receiver"}
+
+	// MockTransport.WriteToAddress sends on an unbuffered packetCh, so
+	// run the send on a goroutine and receive in the main test goroutine
+	// to avoid deadlock.
+	sendErr := make(chan error, 1)
+	go func() { sendErr <- m.rawSendMsgPacket(a, &Node{}, payload) }()
+
+	select {
+	case pkt := <-receiverT.PacketCh():
+		require.Equal(t, payload, pkt.Buf, "packet must be plaintext fallback")
+		require.NoError(t, <-sendErr)
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for packet")
 	}
 }
 
@@ -1066,4 +1114,36 @@ func (c *errorReadNetConn) Read(b []byte) (n int, err error) {
 func (c *errorReadNetConn) Close() error {
 	close(c.closed)
 	return nil
+}
+
+// BenchmarkEncryptLocalState measures the TCP push-pull encryption
+// path. Sized to span the small (single-node gossip ack) through medium
+// and large (push-pull-state) cases.
+func BenchmarkEncryptLocalState(b *testing.B) {
+	keyring, err := NewKeyring(nil, TestKeys[0])
+	require.NoError(b, err)
+
+	conf := DefaultLANConfig()
+	conf.Keyring = keyring
+	conf.GossipVerifyOutgoing = true
+
+	// Build a minimal Memberlist with the bits encryptLocalState needs;
+	// avoiding newMemberlist here keeps the bench setup independent of
+	// network transport availability. initCompressionMetricLabels is
+	// called so the bench remains valid if encryptLocalState ever gains
+	// metric instrumentation that reads the precomputed label slices.
+	m := &Memberlist{config: conf}
+	m.initCompressionMetricLabels()
+
+	sizes := []int{1024, 64 * 1024, 1 << 20} // 1 KiB, 64 KiB, 1 MiB
+	for _, sz := range sizes {
+		sendBuf := randBytes(sz)
+		b.Run(fmt.Sprintf("%d", sz), func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				_, err := m.encryptLocalState(sendBuf, "")
+				require.NoError(b, err)
+			}
+		})
+	}
 }

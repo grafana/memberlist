@@ -4,8 +4,12 @@
 package memberlist
 
 import (
+	"bytes"
+	"encoding/binary"
 	"fmt"
+	"io"
 	"reflect"
+	"slices"
 	"testing"
 	"time"
 
@@ -48,11 +52,26 @@ func TestEncodeDecode(t *testing.T) {
 		t.Fatalf("unexpected err: %s", err)
 	}
 	var out ping
-	if err := decode(buf.Bytes()[1:], &out); err != nil {
+	if err := decode(buf[1:], &out); err != nil {
 		t.Fatalf("unexpected err: %s", err)
 	}
 	if msg.SeqNo != out.SeqNo {
 		t.Fatalf("bad sequence no")
+	}
+}
+
+// TestEncodeRoundTrip verifies repeated encode/decode calls each produce
+// independently correct bytes.
+func TestEncodeRoundTrip(t *testing.T) {
+	const inputs = 32
+	for i := range inputs {
+		buf, err := encode(pingMsg, &ping{SeqNo: uint32(i), Node: "n"}, false)
+		require.NoError(t, err)
+		require.Greater(t, len(buf), 0)
+
+		var p ping
+		require.NoError(t, decode(buf[1:], &p))
+		require.Equal(t, uint32(i), p.SeqNo)
 	}
 }
 
@@ -433,10 +452,10 @@ func TestMakeCompoundMessage(t *testing.T) {
 		t.Fatalf("unexpected err: %s", err)
 	}
 
-	msgs := [][]byte{buf.Bytes(), buf.Bytes(), buf.Bytes()}
+	msgs := [][]byte{buf, buf, buf}
 	compound := makeCompoundMessage(msgs)
 
-	if compound.Len() != 3*buf.Len()+3*compoundOverhead+compoundHeaderOverhead {
+	if len(compound) != 3*len(buf)+3*compoundOverhead+compoundHeaderOverhead {
 		t.Fatalf("bad len")
 	}
 }
@@ -448,10 +467,10 @@ func TestDecodeCompoundMessage(t *testing.T) {
 		t.Fatalf("unexpected err: %s", err)
 	}
 
-	msgs := [][]byte{buf.Bytes(), buf.Bytes(), buf.Bytes()}
+	msgs := [][]byte{buf, buf, buf}
 	compound := makeCompoundMessage(msgs)
 
-	trunc, parts, err := decodeCompoundMessage(compound.Bytes()[1:])
+	trunc, parts, err := decodeCompoundMessage(compound[1:])
 	if err != nil {
 		t.Fatalf("unexpected err: %s", err)
 	}
@@ -462,7 +481,7 @@ func TestDecodeCompoundMessage(t *testing.T) {
 		t.Fatalf("bad parts")
 	}
 	for _, p := range parts {
-		if len(p) != buf.Len() {
+		if len(p) != len(buf) {
 			t.Fatalf("bad part len")
 		}
 	}
@@ -482,10 +501,10 @@ func TestDecodeCompoundMessage_Trunc(t *testing.T) {
 		t.Fatalf("unexpected err: %s", err)
 	}
 
-	msgs := [][]byte{buf.Bytes(), buf.Bytes(), buf.Bytes()}
+	msgs := [][]byte{buf, buf, buf}
 	compound := makeCompoundMessage(msgs)
 
-	trunc, parts, err := decodeCompoundMessage(compound.Bytes()[1:38])
+	trunc, parts, err := decodeCompoundMessage(compound[1:38])
 	if err != nil {
 		t.Fatalf("unexpected err: %s", err)
 	}
@@ -496,25 +515,9 @@ func TestDecodeCompoundMessage_Trunc(t *testing.T) {
 		t.Fatalf("bad parts")
 	}
 	for _, p := range parts {
-		if len(p) != buf.Len() {
+		if len(p) != len(buf) {
 			t.Fatalf("bad part len")
 		}
-	}
-}
-
-func TestCompressDecompressPayload(t *testing.T) {
-	buf, err := compressPayload([]byte("testing"), false)
-	if err != nil {
-		t.Fatalf("unexpected err: %s", err)
-	}
-
-	decomp, err := decompressPayload(buf.Bytes()[1:])
-	if err != nil {
-		t.Fatalf("unexpected err: %s", err)
-	}
-
-	if !reflect.DeepEqual(decomp, []byte("testing")) {
-		t.Fatalf("bad payload: %v", decomp)
 	}
 }
 
@@ -540,8 +543,7 @@ func TestMakeCompoundMessages(t *testing.T) {
 		msg := &ackResp{SeqNo: smallMsgSeqNo, Payload: []byte{byte(i)}}
 		encoded, err := encode(ackRespMsg, msg, false)
 		require.NoError(t, err)
-
-		smallMessages[i] = encoded.Bytes()
+		smallMessages[i] = encoded
 	}
 
 	bigMessages := make([][]byte, 3)
@@ -552,8 +554,7 @@ func TestMakeCompoundMessages(t *testing.T) {
 		msg := &ackResp{SeqNo: bigMsgSeqNo, Payload: payload}
 		encoded, err := encode(ackRespMsg, msg, false)
 		require.NoError(t, err)
-
-		bigMessages[i] = encoded.Bytes()
+		bigMessages[i] = encoded
 	}
 
 	tests := map[string]struct {
@@ -566,17 +567,17 @@ func TestMakeCompoundMessages(t *testing.T) {
 		},
 		"one small message": {
 			input:    smallMessages[0:1],
-			expected: [][]byte{makeCompoundMessage(smallMessages[0:1]).Bytes()},
+			expected: [][]byte{makeCompoundMessage(smallMessages[0:1])},
 		},
 		"few small messages": {
 			input:    smallMessages[0:3],
-			expected: [][]byte{makeCompoundMessage(smallMessages[0:3]).Bytes()},
+			expected: [][]byte{makeCompoundMessage(smallMessages[0:3])},
 		},
 		"many small messages (more than 255)": {
 			input: smallMessages[0:300],
 			expected: [][]byte{
-				makeCompoundMessage(smallMessages[0:255]).Bytes(),
-				makeCompoundMessage(smallMessages[255:300]).Bytes(),
+				makeCompoundMessage(smallMessages[0:255]),
+				makeCompoundMessage(smallMessages[255:300]),
 			},
 		},
 		"one big message": {
@@ -604,8 +605,8 @@ func TestMakeCompoundMessages(t *testing.T) {
 				bigMessages[0],
 				bigMessages[1],
 				bigMessages[2],
-				makeCompoundMessage(smallMessages[0:255]).Bytes(),
-				makeCompoundMessage(smallMessages[255:300]).Bytes(),
+				makeCompoundMessage(smallMessages[0:255]),
+				makeCompoundMessage(smallMessages[255:300]),
 			},
 		},
 	}
@@ -614,17 +615,11 @@ func TestMakeCompoundMessages(t *testing.T) {
 		t.Run(testName, func(t *testing.T) {
 			actual := makeCompoundMessages(testData.input)
 
-			// Get the actual []byte of each message.
-			actualBytes := make([][]byte, 0, len(actual))
-			for _, data := range actual {
-				actualBytes = append(actualBytes, data.Bytes())
-			}
-
-			assert.Equal(t, testData.expected, actualBytes)
+			assert.Equal(t, testData.expected, actual)
 
 			// Ensure we can successfully decode every message.
 			for i := 0; i < len(actual); i++ {
-				msg := actualBytes[i]
+				msg := actual[i]
 				typ := messageType(msg[0])
 
 				switch typ {
@@ -697,4 +692,141 @@ func BenchmarkKRandomNodes(b *testing.B) {
 			kRandomNodes(3, nodes, delegate, excludeFunc)
 		}
 	})
+}
+
+// TestPushPullBuffer_Reused asserts the push-pull pool actually pools —
+// i.e., steady-state Get/Release cycles don't allocate. A regression that
+// drops the pool path entirely (e.g., always returning new(bytes.Buffer))
+// would cause one alloc per iteration and fail this test.
+//
+// sync.Pool may drop entries on GC, so we measure averaged allocations
+// across many iterations and tolerate a small upper bound.
+func TestPushPullBuffer_Reused(t *testing.T) {
+	allocs := testing.AllocsPerRun(1000, func() {
+		b := getPushPullBuffer()
+		b.WriteString("hello")
+		releasePushPullBuffer(b)
+	})
+	require.Less(t, allocs, 0.5, "expected push-pull pool to amortize allocations to ~0/op")
+}
+
+// TestReleasePushPullBuffer_BoundedCap is the push-pull-pool counterpart
+// of TestReleaseLZWBuffer_BoundedCap.
+func TestReleasePushPullBuffer_BoundedCap(t *testing.T) {
+	big := getPushPullBuffer()
+	big.Write(make([]byte, maxPooledPushPullBufCap+1))
+	require.Greater(t, big.Cap(), maxPooledPushPullBufCap)
+
+	releasePushPullBuffer(big)
+	for i := range 10 {
+		b := getPushPullBuffer()
+		require.LessOrEqual(t, b.Cap(), maxPooledPushPullBufCap,
+			"oversized buffer leaked through push-pull pool on iteration %d", i)
+		releasePushPullBuffer(b)
+	}
+}
+
+// BenchmarkEncode isolates the encode() path (msgpack only, no
+// compression).
+func BenchmarkEncode(b *testing.B) {
+	sizes := []int{64, 256, 1500, 16 * 1024}
+	assertBenchSizes(b, sizes)
+	for _, c := range benchCorpora() {
+		for _, size := range sizes {
+			b.Run(fmt.Sprintf("%s/%d", c.name, size), func(b *testing.B) {
+				payload := &compressedPayload{Algo: lzwCompressionType, Buf: c.payload[:size]}
+				b.ResetTimer()
+				b.ReportAllocs()
+				for b.Loop() {
+					_, err := encode(compressMsg, payload, false)
+					require.NoError(b, err)
+				}
+			})
+		}
+	}
+}
+
+// BenchmarkMakeCompoundMessage measures the compound-message hot path,
+// which sits behind every gossip-piggyback send.
+func BenchmarkMakeCompoundMessage(b *testing.B) {
+	sizes := []int{64, 256, 1500}
+	counts := []int{1, 8, 64}
+	for _, sz := range sizes {
+		for _, n := range counts {
+			msgs := make([][]byte, n)
+			for i := range msgs {
+				msgs[i] = randBytes(sz)
+			}
+			b.Run(fmt.Sprintf("%d-msgs-of-%d", n, sz), func(b *testing.B) {
+				b.ReportAllocs()
+				for b.Loop() {
+					_ = makeCompoundMessage(msgs)
+				}
+			})
+		}
+	}
+}
+
+// BenchmarkPushPullBuffer isolates pushPullBufPool's contribution on
+// decryptRemoteState's io.CopyN staging buffer. NoPool uses a
+// function-local bytes.Buffer per call. Push-pull state can range
+// from a few KiB (single-node gossip) up to maxPushStateBytes
+// (20 MiB); the pool earns its keep on the larger sizes where
+// io.CopyN's growth-doubling does the most work.
+func BenchmarkPushPullBuffer(b *testing.B) {
+	keyring, err := NewKeyring(nil, TestKeys[0])
+	require.NoError(b, err)
+	conf := DefaultLANConfig()
+	conf.Keyring = keyring
+	conf.GossipVerifyOutgoing = true
+	m := &Memberlist{config: conf}
+	m.initCompressionMetricLabels()
+
+	for _, sz := range []int{64 * 1024, 1 << 20, 8 << 20} {
+		sendBuf := randBytes(sz)
+		envelope, err := m.encryptLocalState(sendBuf, "")
+		require.NoError(b, err)
+		// decryptRemoteState writes the encryptMsg byte into the
+		// staging buffer itself, so the input it reads from begins
+		// immediately after that byte.
+		cipherInput := envelope[1:]
+
+		b.Run(fmt.Sprintf("%d/pool", sz), func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				_, err := m.decryptRemoteState(bytes.NewReader(cipherInput), "")
+				require.NoError(b, err)
+			}
+		})
+		b.Run(fmt.Sprintf("%d/no pool", sz), func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				_, err := decryptRemoteStateNoBufPool(m, bytes.NewReader(cipherInput), "")
+				require.NoError(b, err)
+			}
+		})
+	}
+}
+
+// decryptRemoteStateNoBufPool mirrors decryptRemoteState but stages
+// cipher text in a function-local bytes.Buffer instead of via
+// pushPullBufPool. Benchmark-only — used by BenchmarkPushPullBuffer
+// to measure the pool's marginal contribution.
+func decryptRemoteStateNoBufPool(m *Memberlist, bufConn io.Reader, streamLabel string) ([]byte, error) {
+	var cipherText bytes.Buffer
+	cipherText.WriteByte(byte(encryptMsg))
+	if _, err := io.CopyN(&cipherText, bufConn, 4); err != nil {
+		return nil, err
+	}
+	moreBytes := binary.BigEndian.Uint32(cipherText.Bytes()[1:5])
+	if moreBytes > maxPushStateBytes {
+		return nil, fmt.Errorf("remote node state is larger than limit (%d)", moreBytes)
+	}
+	if _, err := io.CopyN(&cipherText, bufConn, int64(moreBytes)); err != nil {
+		return nil, err
+	}
+	dataBytes := slices.Concat(cipherText.Bytes()[:5], []byte(streamLabel))
+	cipherBytes := cipherText.Bytes()[5:]
+	keys := m.config.Keyring.GetKeys()
+	return decryptPayload(keys, cipherBytes, dataBytes)
 }

@@ -1,8 +1,9 @@
 module github.com/hashicorp/memberlist
 
-go 1.20
+go 1.24
 
 require (
+	github.com/golang/snappy v1.0.0
 	github.com/google/btree v0.0.0-20180813153112-4030bb1f1f0c
 	github.com/hashicorp/go-metrics v0.5.4
 	github.com/hashicorp/go-msgpack/v2 v2.1.1
@@ -10,7 +11,7 @@ require (
 	github.com/hashicorp/go-sockaddr v1.0.0
 	github.com/miekg/dns v1.1.26
 	github.com/sean-/seed v0.0.0-20170313163322-e2103e2c3529
-	github.com/stretchr/testify v1.4.0
+	github.com/stretchr/testify v1.11.1
 )
 
 require (
@@ -23,5 +24,5 @@ require (
 	golang.org/x/crypto v0.32.0 // indirect
 	golang.org/x/net v0.34.0 // indirect
 	golang.org/x/sys v0.29.0 // indirect
-	gopkg.in/yaml.v2 v2.4.0 // indirect
+	gopkg.in/yaml.v3 v3.0.1 // indirect
 )

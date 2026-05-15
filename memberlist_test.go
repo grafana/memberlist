@@ -333,50 +333,84 @@ func TestCreate_invalidLoggerSettings(t *testing.T) {
 }
 
 func TestCreate(t *testing.T) {
-	c := testConfig(t)
-	c.ProtocolVersion = ProtocolVersionMin
-	c.DelegateProtocolVersion = 13
-	c.DelegateProtocolMin = 12
-	c.DelegateProtocolMax = 24
+	t.Run("happy path", func(t *testing.T) {
+		c := testConfig(t)
+		c.ProtocolVersion = ProtocolVersionMin
+		c.DelegateProtocolVersion = 13
+		c.DelegateProtocolMin = 12
+		c.DelegateProtocolMax = 24
 
-	m, err := Create(c)
-	require.NoError(t, err)
-	defer func() {
-		if err := m.Shutdown(); err != nil {
-			t.Fatal(err)
+		m, err := Create(c)
+		require.NoError(t, err)
+		defer func() {
+			if err := m.Shutdown(); err != nil {
+				t.Fatal(err)
+			}
+		}()
+
+		yield()
+
+		members := m.Members()
+		if len(members) != 1 {
+			t.Fatalf("bad number of members")
 		}
-	}()
 
-	yield()
+		if members[0].PMin != ProtocolVersionMin {
+			t.Fatalf("bad: %#v", members[0])
+		}
 
-	members := m.Members()
-	if len(members) != 1 {
-		t.Fatalf("bad number of members")
-	}
+		if members[0].PMax != ProtocolVersionMax {
+			t.Fatalf("bad: %#v", members[0])
+		}
 
-	if members[0].PMin != ProtocolVersionMin {
-		t.Fatalf("bad: %#v", members[0])
-	}
+		if members[0].PCur != c.ProtocolVersion {
+			t.Fatalf("bad: %#v", members[0])
+		}
 
-	if members[0].PMax != ProtocolVersionMax {
-		t.Fatalf("bad: %#v", members[0])
-	}
+		if members[0].DMin != c.DelegateProtocolMin {
+			t.Fatalf("bad: %#v", members[0])
+		}
 
-	if members[0].PCur != c.ProtocolVersion {
-		t.Fatalf("bad: %#v", members[0])
-	}
+		if members[0].DMax != c.DelegateProtocolMax {
+			t.Fatalf("bad: %#v", members[0])
+		}
 
-	if members[0].DMin != c.DelegateProtocolMin {
-		t.Fatalf("bad: %#v", members[0])
-	}
+		if members[0].DCur != c.DelegateProtocolVersion {
+			t.Fatalf("bad: %#v", members[0])
+		}
+	})
 
-	if members[0].DMax != c.DelegateProtocolMax {
-		t.Fatalf("bad: %#v", members[0])
-	}
+	t.Run("compression algorithm", func(t *testing.T) {
+		cases := []struct {
+			name         string
+			algo         CompressionAlgorithm
+			wantInternal compressionType
+			wantErr      string
+		}{
+			{"empty default", "", lzwCompressionType, ""},
+			{"explicit lzw", CompressionAlgorithmLZW, lzwCompressionType, ""},
+			{"explicit snappy", CompressionAlgorithmSnappy, snappyCompressionType, ""},
+			{"unknown algo", "zstd", 0, `memberlist: unknown CompressionAlgorithm "zstd"`},
+			{"wrong case", "LZW", 0, `memberlist: unknown CompressionAlgorithm "LZW"`},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				c := DefaultLANConfig()
+				c.BindAddr = getBindAddr().String()
+				c.CompressionAlgorithm = tc.algo
 
-	if members[0].DCur != c.DelegateProtocolVersion {
-		t.Fatalf("bad: %#v", members[0])
-	}
+				m, err := Create(c)
+				if tc.wantErr != "" {
+					require.EqualError(t, err, tc.wantErr)
+					require.Nil(t, m)
+					return
+				}
+				require.NoError(t, err)
+				defer func() { require.NoError(t, m.Shutdown()) }()
+				require.Equal(t, tc.wantInternal, m.compressionType)
+			})
+		}
+	})
 }
 
 func TestMemberList_CreateShutdown(t *testing.T) {
