@@ -10,9 +10,7 @@
   Rollout note: every cluster member must be upgraded to a build that decodes
   snappy BEFORE any member is configured to emit it. A receiver that does not
   know the algorithm logs `cannot decompress unknown algorithm` and drops the
-  packet — it does not panic. On the gossip path the message is retried; on
-  the direct-probe path the drop can cause spurious dead-marking during a
-  partial rollout.
+  packet — it does not panic.
 - Reduce per-call allocations on the compression and push-pull receive
   paths by reusing internal scratch buffers. Pools are internal only;
   public-surface returns allocate fresh memory each call. Covers:
