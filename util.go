@@ -232,12 +232,17 @@ OUTER:
 	return kNodes
 }
 
-// makeCompoundMessages takes a list of messages and packs
-// them into one or multiple messages based on the limitations
-// of compound messages (255 messages each, 64KB max message size).
+// makeCompoundMessages takes a list of messages and packs them into
+// one or multiple messages based on the limitations of compound
+// messages (255 messages each, 64KB max message size).
 //
-// The input msgs can be modified in-place. Each returned slice is a
-// freshly-allocated copy owned by the caller.
+// The input msgs's underlying array is rearranged in place: small
+// messages are kept and oversized ones are passed through to the
+// output. Returned slices have mixed ownership: compounds produced
+// by makeCompoundMessage are freshly-allocated; oversized messages
+// alias the input. Callers must therefore treat returned slices,
+// and the underlying bytes of every msgs entry, as read-only until
+// the returned slices are consumed.
 func makeCompoundMessages(msgs [][]byte) [][]byte {
 	const (
 		maxMsgs      = math.MaxUint8
@@ -259,9 +264,9 @@ func makeCompoundMessages(msgs [][]byte) [][]byte {
 			continue
 		}
 
-		// Oversized message — send it alone. Copy so the caller owns
-		// the returned slice independently of the input it passed in.
-		bufs = append(bufs, bytes.Clone(msgs[r]))
+		// Oversized message — send it alone. Passes the input slice
+		// through directly; callers do not mutate the result.
+		bufs = append(bufs, msgs[r])
 		r++
 	}
 	msgs = msgs[:w]
