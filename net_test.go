@@ -1019,10 +1019,7 @@ func TestGossip_MismatchedKeys(t *testing.T) {
 		}
 	}()
 
-	bindPort := m1.config.BindPort
-
 	c2 := testConfig(t)
-	c2.BindPort = bindPort
 	c2.SecretKey = []byte("XhX/w702/JKKK7/7OtM9Ww==")
 
 	m2, err := Create(c2)
@@ -1034,7 +1031,8 @@ func TestGossip_MismatchedKeys(t *testing.T) {
 	}()
 
 	// Make sure we get this error on the joining side
-	_, err = m2.Join([]string{c1.Name + "/" + c1.BindAddr})
+	joinAddr := fmt.Sprintf("%s/%s:%d", m1.config.Name, m1.config.BindAddr, m1.config.BindPort)
+	_, err = m2.Join([]string{joinAddr})
 	if err == nil || !strings.Contains(err.Error(), "no installed keys could decrypt the message") {
 		t.Fatalf("bad: %s", err)
 	}
