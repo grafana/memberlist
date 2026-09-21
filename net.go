@@ -1128,6 +1128,16 @@ func (m *Memberlist) sendLocalState(conn net.Conn, join bool, streamLabel string
 // Returns a freshly-allocated byte slice owned by the caller.
 // On error nil is returned.
 func (m *Memberlist) encryptLocalState(sendBuf []byte, streamLabel string) ([]byte, error) {
+	// Bound the input before encryptedLength to avoid integer overflow.
+	if len(sendBuf) > maxPushStateBytes {
+		return nil, fmt.Errorf("stream payload length (%d) exceeds limit (%d)", len(sendBuf), maxPushStateBytes)
+	}
+	encVsn := m.encryptionVersion()
+	encLen := encryptedLength(encVsn, len(sendBuf))
+	if encLen > maxPushStateBytes {
+		return nil, fmt.Errorf("encrypted stream length (%d) exceeds limit (%d)", encLen, maxPushStateBytes)
+	}
+
 	var buf bytes.Buffer
 
 	// Write the encryptMsg byte
@@ -1135,8 +1145,6 @@ func (m *Memberlist) encryptLocalState(sendBuf []byte, streamLabel string) ([]by
 
 	// Write the size of the message
 	sizeBuf := make([]byte, 4)
-	encVsn := m.encryptionVersion()
-	encLen := encryptedLength(encVsn, len(sendBuf))
 	binary.BigEndian.PutUint32(sizeBuf, uint32(encLen))
 	buf.Write(sizeBuf)
 
