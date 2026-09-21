@@ -30,6 +30,12 @@
 
 ### Changes
 
+- Require Go 1.25 or newer.
+- Use `github.com/hashicorp/go-metrics` directly. `Config.MetricLabels` and
+  `NetTransportConfig.MetricLabels` now accept that package's label type, and
+  metrics are emitted through its global sink. Consumers using the Armon
+  metrics package must migrate their labels and sink initialization.
+
 - TCP push-pull and other TCP stream messages now skip compression when
   the compressed output is no smaller than the input, falling back to a
   plaintext frame. Mirrors the existing UDP packet behaviour in
@@ -42,4 +48,15 @@
 
 ### Fixed
 
+- Preserve missing-self handling in `Leave` and synchronize acknowledgement
+  timer initialization with handler registration and expiry.
+- Exhaustively select eligible nodes from small pools while preserving
+  delegate preferences and excluding duplicate nodes.
+
 ### Security
+
+- Reject invalid TCP node counts, user-state lengths, and user-message lengths,
+  and reject empty compressed stream messages.
+- Allow up to 40 MiB of decompressed data for both LZW and Snappy, matching
+  upstream's combined node and user-state budget. The previous fork limit was
+  21 MiB; the 20 MiB encrypted-wire limit remains unchanged.

@@ -1,4 +1,4 @@
-// Copyright (c) HashiCorp, Inc.
+// Copyright IBM Corp. 2013, 2026
 // SPDX-License-Identifier: MPL-2.0
 
 package memberlist
@@ -14,12 +14,12 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	iretry "github.com/hashicorp/memberlist/internal/retry"
 	"github.com/miekg/dns"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -253,7 +253,7 @@ func TestCreate_secretKeyEmpty(t *testing.T) {
 func TestCreate_checkBroadcastQueueMetrics(t *testing.T) {
 	sink := registerInMemorySink(t)
 	c := DefaultLANConfig()
-	c.QueueCheckInterval = 1 * time.Second
+	c.QueueCheckInterval = 10 * time.Millisecond
 	c.BindAddr = getBindAddr().String()
 	c.SecretKey = make([]byte, 0)
 
@@ -264,8 +264,6 @@ func TestCreate_checkBroadcastQueueMetrics(t *testing.T) {
 			t.Fatal(err)
 		}
 	}()
-
-	time.Sleep(3 * time.Second)
 
 	sampleName := "consul.usage.test.memberlist.queue.broadcasts"
 	verifySampleExists(t, sampleName, sink)
@@ -542,7 +540,6 @@ func TestMemberList_ResolveAddr(t *testing.T) {
 	}
 
 	for _, tc := range cases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			got, err := m.resolveAddr(tc.in)
@@ -603,7 +600,9 @@ func (h dnsHandler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 }
 
 func TestMemberList_ResolveAddr_TCP_First(t *testing.T) {
-	bind := "127.0.0.1:8600"
+	// Use unique IP address and dynamic port allocation
+	bindIP := getBindAddr()
+	bind := net.JoinHostPort(bindIP.String(), "0")
 
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -626,6 +625,9 @@ func TestMemberList_ResolveAddr_TCP_First(t *testing.T) {
 	}()
 	wg.Wait()
 
+	// Get the actual bind address after server starts
+	actualBind := server.Listener.Addr().String()
+
 	tmpFile, err := os.CreateTemp("", "")
 	if err != nil {
 		t.Fatalf("err: %v", err)
@@ -636,7 +638,7 @@ func TestMemberList_ResolveAddr_TCP_First(t *testing.T) {
 		}
 	}()
 
-	content := []byte(fmt.Sprintf("nameserver %s", bind))
+	content := fmt.Appendf(nil, "nameserver %s", actualBind)
 	if _, err := tmpFile.Write(content); err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -777,19 +779,14 @@ func testMemberlist_Join_with_Labels(t *testing.T, secretKey []byte) {
 		}
 	}()
 
-	checkHost := func(t *testing.T, m *Memberlist, expected int) {
-		assert.Equal(t, expected, len(m.Members()))
-		assert.Equal(t, expected, m.estNumNodes())
-	}
-
 	runStep(t, "same label can join", func(t *testing.T) {
 		num, err := m2.Join([]string{m1.config.Name + "/" + m1.config.BindAddr})
 		require.NoError(t, err)
 		require.Equal(t, 1, num)
 
-		// Check the hosts
-		checkHost(t, m2, 2)
-		checkHost(t, m1, 2)
+		// Wait for cluster convergence (both members and estimate)
+		waitUntilSizeAndEstimate(t, m2, 2)
+		waitUntilSizeAndEstimate(t, m1, 2)
 	})
 
 	// Create a third node that uses no label
@@ -808,11 +805,10 @@ func testMemberlist_Join_with_Labels(t *testing.T, secretKey []byte) {
 		_, err := m3.Join([]string{m1.config.Name + "/" + m1.config.BindAddr})
 		require.Error(t, err)
 
-		// Check the failed host
-		checkHost(t, m3, 1)
-		// Check the existing hosts
-		checkHost(t, m2, 2)
-		checkHost(t, m1, 2)
+		// Verify cluster state remains unchanged after failed join
+		waitUntilSizeAndEstimate(t, m3, 1)
+		waitUntilSizeAndEstimate(t, m2, 2)
+		waitUntilSizeAndEstimate(t, m1, 2)
 	})
 
 	// Create a fourth node that uses a mismatched label
@@ -832,13 +828,11 @@ func testMemberlist_Join_with_Labels(t *testing.T, secretKey []byte) {
 		_, err := m4.Join([]string{m1.config.Name + "/" + m1.config.BindAddr})
 		require.Error(t, err)
 
-		// Check the failed host
-		checkHost(t, m4, 1)
-		// Check the previous failed host
-		checkHost(t, m3, 1)
-		// Check the existing hosts
-		checkHost(t, m2, 2)
-		checkHost(t, m1, 2)
+		// Verify cluster state remains unchanged after failed join
+		waitUntilSizeAndEstimate(t, m4, 1)
+		waitUntilSizeAndEstimate(t, m3, 1)
+		waitUntilSizeAndEstimate(t, m2, 2)
+		waitUntilSizeAndEstimate(t, m1, 2)
 	})
 }
 
@@ -985,13 +979,13 @@ func TestMemberlist_JoinDifferentNetworksMultiMasks(t *testing.T) {
 }
 
 type CustomMergeDelegate struct {
-	invoked bool
+	invoked atomic.Bool
 	t       *testing.T
 }
 
 func (c *CustomMergeDelegate) NotifyMerge(nodes []*Node) error {
 	c.t.Logf("Cancel merge")
-	c.invoked = true
+	c.invoked.Store(true)
 	return fmt.Errorf("Custom merge canceled")
 }
 
@@ -1041,23 +1035,20 @@ func TestMemberlist_Join_Cancel(t *testing.T) {
 	}
 
 	// Check delegate invocation
-	if !merge1.invoked {
-		t.Fatalf("should invoke delegate")
-	}
-	if !merge2.invoked {
-		t.Fatalf("should invoke delegate")
-	}
+	require.Eventually(t, func() bool {
+		return merge1.invoked.Load() && merge2.invoked.Load()
+	}, time.Second, time.Millisecond, "both merge delegates must be invoked")
 }
 
 type CustomAliveDelegate struct {
 	Ignore string
-	count  int
+	count  atomic.Int32
 
 	t *testing.T
 }
 
 func (c *CustomAliveDelegate) NotifyAlive(peer *Node) error {
-	c.count++
+	c.count.Add(1)
 	if peer.Name == c.Ignore {
 		return nil
 	}
@@ -1117,11 +1108,11 @@ func TestMemberlist_Join_Cancel_Passive(t *testing.T) {
 	}
 
 	// Check delegate invocation
-	if alive1.count == 0 {
-		t.Fatalf("should invoke delegate: %d", alive1.count)
+	if alive1.count.Load() == 0 {
+		t.Fatalf("should invoke delegate: %d", alive1.count.Load())
 	}
-	if alive2.count == 0 {
-		t.Fatalf("should invoke delegate: %d", alive2.count)
+	if alive2.count.Load() == 0 {
+		t.Fatalf("should invoke delegate: %d", alive2.count.Load())
 	}
 }
 
@@ -1193,6 +1184,18 @@ func joinAndTestMemberShip(t *testing.T, self *Memberlist, membersToJoin []strin
 }
 
 func TestMemberlist_Leave(t *testing.T) {
+	t.Run("missing self entry", func(t *testing.T) {
+		var logs bytes.Buffer
+		m := &Memberlist{
+			config: &Config{Name: "self"},
+			logger: log.New(&logs, "", 0),
+		}
+		require.NoError(t, m.Leave(time.Second))
+		require.True(t, m.hasLeft())
+		require.Contains(t, logs.String(), "Leave but we're not in the node map")
+		require.NoError(t, m.Leave(time.Second))
+	})
+
 	newConfig := func() *Config {
 		c := testConfig(t)
 		c.GossipInterval = time.Millisecond
@@ -1488,7 +1491,7 @@ func TestMemberlist_UserData(t *testing.T) {
 
 	bcasts := make([][]byte, 256)
 	for i := range bcasts {
-		bcasts[i] = []byte(fmt.Sprintf("%d", i))
+		bcasts[i] = fmt.Appendf(nil, "%d", i)
 	}
 
 	// Create a second node
@@ -1734,15 +1737,9 @@ func TestMemberlist_Join_Protocol_Compatibility(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, 1, num)
 
-		// Check the hosts
-		if len(m2.Members()) != 2 {
-			t.Fatalf("should have 2 nodes! %v", m2.Members())
-		}
-
-		// Check the hosts
-		if len(m1.Members()) != 2 {
-			t.Fatalf("should have 2 nodes! %v", m1.Members())
-		}
+		// Wait for cluster convergence
+		waitUntilSize(t, m2, 2)
+		waitUntilSize(t, m1, 2)
 	}
 
 	t.Run("2,1", func(t *testing.T) {
@@ -1835,18 +1832,12 @@ func TestMemberlist_Join_IPv6(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 1, num)
 
-	// Check the hosts
-	if len(m2.Members()) != 2 {
-		t.Fatalf("should have 2 nodes! %v", m2.Members())
-	}
-
-	if len(m1.Members()) != 2 {
-		t.Fatalf("should have 2 nodes! %v", m2.Members())
-	}
+	waitUntilSize(t, m2, 2)
+	waitUntilSize(t, m1, 2)
 }
 
 func reservePort(t *testing.T, ip net.IP, purpose string) int {
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		tcpAddr := &net.TCPAddr{IP: ip, Port: 0}
 		tcpLn, err := net.ListenTCP("tcp", tcpAddr)
 		if err != nil {
@@ -2060,11 +2051,27 @@ func TestMemberlist_PingDelegate(t *testing.T) {
 
 func waitUntilSize(t *testing.T, m *Memberlist, expected int) {
 	t.Helper()
-	retry(t, 15, 500*time.Millisecond, func(failf func(string, ...interface{})) {
+	retry(t, 15, 500*time.Millisecond, func(failf func(string, ...any)) {
 		t.Helper()
 
 		if m.NumMembers() != expected {
 			failf("%s expected to have %d members but had: %v", m.config.Name, expected, m.Members())
+		}
+	})
+}
+
+// waitUntilSizeAndEstimate waits for both NumMembers and estNumNodes to reach expected value
+// Use this when you need to verify both metrics converge (e.g., after successful joins)
+func waitUntilSizeAndEstimate(t *testing.T, m *Memberlist, expected int) {
+	t.Helper()
+	retry(t, 15, 500*time.Millisecond, func(failf func(string, ...any)) {
+		t.Helper()
+
+		if m.NumMembers() != expected {
+			failf("%s expected to have %d members but had: %v", m.config.Name, expected, m.Members())
+		}
+		if m.estNumNodes() != expected {
+			failf("%s expected to have %d estimated nodes but had: %d", m.config.Name, expected, m.estNumNodes())
 		}
 	})
 }
@@ -2098,7 +2105,7 @@ func waitUntilPortIsFree(t *testing.T, m *Memberlist) {
 	addr := m.config.BindAddr
 	port := m.config.BindPort
 
-	retry(t, 15, 250*time.Millisecond, func(failf func(string, ...interface{})) {
+	retry(t, 15, 250*time.Millisecond, func(failf func(string, ...any)) {
 		t.Helper()
 
 		if err := isPortFree(t, addr, port); err != nil {

@@ -1,4 +1,4 @@
-// Copyright (c) HashiCorp, Inc.
+// Copyright IBM Corp. 2013, 2026
 // SPDX-License-Identifier: MPL-2.0
 
 package memberlist
@@ -10,10 +10,12 @@ import (
 	"net"
 	"os"
 	"reflect"
+	"runtime"
 	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	metrics "github.com/hashicorp/go-metrics"
@@ -29,7 +31,7 @@ func HostMemberlist(host string, t *testing.T, f func(*Config)) *Memberlist {
 	c.Name = host
 	c.BindAddr = host
 	c.BindPort = 0 // choose a free port
-	c.Logger = log.New(os.Stderr, host, log.LstdFlags)
+	c.Logger = log.New(os.Stderr, host+" ", log.LstdFlags)
 	if f != nil {
 		f(c)
 	}
@@ -819,11 +821,11 @@ func TestMemberList_ProbeNode_Awareness_MissedNack(t *testing.T) {
 		c.ProbeInterval = 200 * time.Millisecond
 		probeTimeMax = c.ProbeInterval + 50*time.Millisecond
 	})
-	defer func() {
+	t.Cleanup(func() {
 		if err := m1.Shutdown(); err != nil {
 			t.Fatal(err)
 		}
-	}()
+	})
 
 	bindPort := m1.config.BindPort
 
@@ -832,11 +834,11 @@ func TestMemberList_ProbeNode_Awareness_MissedNack(t *testing.T) {
 		c.ProbeTimeout = 10 * time.Millisecond
 		c.ProbeInterval = 200 * time.Millisecond
 	})
-	defer func() {
+	t.Cleanup(func() {
 		if err := m2.Shutdown(); err != nil {
 			t.Fatal(err)
 		}
-	}()
+	})
 
 	a1 := alive{Node: addr1.String(), Addr: ip1, Port: uint16(bindPort), Incarnation: 1, Vsn: m1.config.BuildVsnArray()}
 	m1.aliveNode(&a1, nil, true)
@@ -851,11 +853,9 @@ func TestMemberList_ProbeNode_Awareness_MissedNack(t *testing.T) {
 	m1.aliveNode(&a4, nil, false)
 
 	// Make sure health looks good.
-	if score := m1.GetHealthScore(); score != 0 {
-		t.Fatalf("bad: %d", score)
-	}
+	require.Equal(t, 0, m1.GetHealthScore())
 
-	// Have node m1 probe m4.
+	// Have node m1 probe m4, which isn't up
 	n := m1.nodeMap[addr4.String()]
 	startProbe := time.Now()
 	m1.probeNode(n)
@@ -864,9 +864,7 @@ func TestMemberList_ProbeNode_Awareness_MissedNack(t *testing.T) {
 	// Node should be reported suspect.
 
 	m1.nodeLock.Lock()
-	if n.State != StateSuspect {
-		t.Fatalf("expect node to be suspect")
-	}
+	require.Equal(t, StateSuspect, n.State, "expect node to be suspect")
 	m1.nodeLock.Unlock()
 
 	// Make sure we timed out approximately on time.
@@ -1024,7 +1022,7 @@ func TestMemberList_ProbeNode_Buddy(t *testing.T) {
 	}
 
 	// Should be alive msg.
-	if messageType(m2.broadcasts.orderedView(true)[0].b.Message()[0]) != aliveMsg {
+	if messageType(m2.broadcasts.orderedView()[0].b.Message()[0]) != aliveMsg {
 		t.Fatalf("expected queued alive msg")
 	}
 }
@@ -1175,43 +1173,117 @@ func TestMemberList_NextSeq(t *testing.T) {
 	}
 }
 
-func ackHandlerExists(t *testing.T, m *Memberlist, idx uint32) bool {
+func ackHandlerExists(t *testing.T, m *Memberlist) bool {
 	t.Helper()
 
 	m.ackLock.Lock()
-	_, ok := m.ackHandlers[idx]
+	_, ok := m.ackHandlers[0]
 	m.ackLock.Unlock()
 
 	return ok
 }
 
 func TestMemberList_setProbeChannels(t *testing.T) {
-	m := &Memberlist{ackHandlers: make(map[uint32]*ackHandler)}
-
-	ch := make(chan ackMessage, 1)
-	m.setProbeChannels(0, ch, nil, 10*time.Millisecond)
-
-	require.True(t, ackHandlerExists(t, m, 0), "missing handler")
-
-	time.Sleep(20 * time.Millisecond)
-
-	require.False(t, ackHandlerExists(t, m, 0), "non-reaped handler")
+	for _, timeout := range []time.Duration{0, time.Second} {
+		t.Run(timeout.String(), func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				m := &Memberlist{ackHandlers: make(map[uint32]*ackHandler)}
+				ch := make(chan ackMessage, 1)
+				m.setProbeChannels(0, ch, nil, timeout)
+				if timeout > 0 {
+					require.True(t, ackHandlerExists(t, m))
+				}
+				time.Sleep(timeout)
+				synctest.Wait()
+				require.False(t, ackHandlerExists(t, m), "non-reaped handler")
+				require.Len(t, ch, 1)
+				require.False(t, (<-ch).Complete)
+			})
+		})
+	}
+	t.Run("ack stops timeout", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			m := &Memberlist{ackHandlers: make(map[uint32]*ackHandler)}
+			ch := make(chan ackMessage, 1)
+			m.setProbeChannels(0, ch, nil, time.Second)
+			m.invokeAckHandler(ackResp{SeqNo: 0}, time.Now())
+			require.False(t, ackHandlerExists(t, m))
+			require.Len(t, ch, 1)
+			require.True(t, (<-ch).Complete)
+			time.Sleep(time.Second)
+			synctest.Wait()
+			require.Empty(t, ch, "acknowledged probe must not time out")
+		})
+	})
 }
 
 func TestMemberList_setAckHandler(t *testing.T) {
-	m := &Memberlist{ackHandlers: make(map[uint32]*ackHandler)}
-
-	f := func([]byte, time.Time) {}
-	m.setAckHandler(0, f, 10*time.Millisecond)
-
-	require.True(t, ackHandlerExists(t, m, 0), "missing handler")
-
-	time.Sleep(20 * time.Millisecond)
-
-	require.False(t, ackHandlerExists(t, m, 0), "non-reaped handler")
+	for _, timeout := range []time.Duration{0, time.Second} {
+		t.Run(timeout.String(), func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				m := &Memberlist{ackHandlers: make(map[uint32]*ackHandler)}
+				called := false
+				m.setAckHandler(0, func([]byte, time.Time) { called = true }, timeout)
+				if timeout > 0 {
+					require.True(t, ackHandlerExists(t, m))
+				}
+				time.Sleep(timeout)
+				synctest.Wait()
+				require.False(t, ackHandlerExists(t, m), "non-reaped handler")
+				m.invokeAckHandler(ackResp{SeqNo: 0}, time.Now())
+				require.False(t, called, "expired handler must not receive an ack")
+			})
+		})
+	}
 }
 
 func TestMemberList_invokeAckHandler(t *testing.T) {
+	t.Run("concurrent registration", func(t *testing.T) {
+		for _, probe := range []bool{false, true} {
+			t.Run(fmt.Sprintf("probe=%t", probe), func(t *testing.T) {
+				m := &Memberlist{ackHandlers: make(map[uint32]*ackHandler)}
+				t.Cleanup(func() {
+					m.ackLock.Lock()
+					defer m.ackLock.Unlock()
+					for _, handler := range m.ackHandlers {
+						handler.timer.Stop()
+					}
+				})
+				for seq := range uint32(128) {
+					ch := make(chan ackMessage, 1)
+					registered := make(chan struct{})
+					go func() {
+						defer close(registered)
+						if probe {
+							m.setProbeChannels(seq, ch, nil, time.Minute)
+						} else {
+							m.setAckHandler(seq, func(payload []byte, timestamp time.Time) {
+								ch <- ackMessage{Complete: true, Payload: payload, Timestamp: timestamp}
+							}, time.Minute)
+						}
+					}()
+					deadline := time.NewTimer(5 * time.Second)
+				WAIT:
+					for {
+						m.invokeAckHandler(ackResp{SeqNo: seq}, time.Now())
+						select {
+						case ack := <-ch:
+							require.True(t, ack.Complete)
+							break WAIT
+						case <-deadline.C:
+							t.Fatal("ack was not delivered")
+						default:
+							runtime.Gosched()
+						}
+					}
+					deadline.Stop()
+					<-registered
+				}
+				require.Empty(t, m.ackHandlers)
+			})
+		}
+	})
+
 	m := &Memberlist{ackHandlers: make(map[uint32]*ackHandler)}
 
 	// Does nothing
@@ -1227,7 +1299,7 @@ func TestMemberList_invokeAckHandler(t *testing.T) {
 		t.Fatalf("b not set")
 	}
 
-	require.False(t, ackHandlerExists(t, m, 0), "non-reaped handler")
+	require.False(t, ackHandlerExists(t, m), "non-reaped handler")
 }
 
 func TestMemberList_invokeAckHandler_Channel_Ack(t *testing.T) {
@@ -1261,7 +1333,7 @@ func TestMemberList_invokeAckHandler_Channel_Ack(t *testing.T) {
 		t.Fatalf("message not sent")
 	}
 
-	require.False(t, ackHandlerExists(t, m, 0), "non-reaped handler")
+	require.False(t, ackHandlerExists(t, m), "non-reaped handler")
 }
 
 func TestMemberList_invokeAckHandler_Channel_Nack(t *testing.T) {
@@ -1292,7 +1364,7 @@ func TestMemberList_invokeAckHandler_Channel_Nack(t *testing.T) {
 
 	// Getting a nack doesn't reap the handler so that we can still forward
 	// an ack up to the reap time, if we get one.
-	require.True(t, ackHandlerExists(t, m, 0), "handler should not be reaped")
+	require.True(t, ackHandlerExists(t, m), "handler should not be reaped")
 
 	ack := ackResp{0, []byte{0, 0, 0}}
 	m.invokeAckHandler(ack, time.Now())
@@ -1313,7 +1385,7 @@ func TestMemberList_invokeAckHandler_Channel_Nack(t *testing.T) {
 		t.Fatalf("message not sent")
 	}
 
-	require.False(t, ackHandlerExists(t, m, 0), "non-reaped handler")
+	require.False(t, ackHandlerExists(t, m), "non-reaped handler")
 }
 
 func TestMemberList_AliveNode_NewNode(t *testing.T) {
@@ -1608,7 +1680,7 @@ func TestMemberList_AliveNode_Refute(t *testing.T) {
 	}
 
 	// Should be alive mesg
-	if messageType(m.broadcasts.orderedView(true)[0].b.Message()[0]) != aliveMsg {
+	if messageType(m.broadcasts.orderedView()[0].b.Message()[0]) != aliveMsg {
 		t.Fatalf("expected queued alive msg")
 	}
 }
@@ -1749,7 +1821,7 @@ func TestMemberList_SuspectNode(t *testing.T) {
 	}
 
 	// Check its a suspect message
-	if messageType(m.broadcasts.orderedView(true)[0].b.Message()[0]) != suspectMsg {
+	if messageType(m.broadcasts.orderedView()[0].b.Message()[0]) != suspectMsg {
 		t.Fatalf("expected queued suspect msg")
 	}
 
@@ -1774,7 +1846,7 @@ func TestMemberList_SuspectNode(t *testing.T) {
 	}
 
 	// Check its a suspect message
-	if messageType(m.broadcasts.orderedView(true)[0].b.Message()[0]) != deadMsg {
+	if messageType(m.broadcasts.orderedView()[0].b.Message()[0]) != deadMsg {
 		t.Fatalf("expected queued dead msg")
 	}
 }
@@ -1885,7 +1957,7 @@ func TestMemberList_SuspectNode_Refute(t *testing.T) {
 	}
 
 	// Should be alive mesg
-	if messageType(m.broadcasts.orderedView(true)[0].b.Message()[0]) != aliveMsg {
+	if messageType(m.broadcasts.orderedView()[0].b.Message()[0]) != aliveMsg {
 		t.Fatalf("expected queued alive msg")
 	}
 
@@ -1952,7 +2024,7 @@ func TestMemberList_DeadNodeLeft(t *testing.T) {
 	}
 
 	// Check its a dead message
-	if messageType(m.broadcasts.orderedView(true)[0].b.Message()[0]) != deadMsg {
+	if messageType(m.broadcasts.orderedView()[0].b.Message()[0]) != deadMsg {
 		t.Fatalf("expected queued dead msg")
 	}
 
@@ -2036,7 +2108,7 @@ func TestMemberList_DeadNode(t *testing.T) {
 	}
 
 	// Check its a dead message
-	if messageType(m.broadcasts.orderedView(true)[0].b.Message()[0]) != deadMsg {
+	if messageType(m.broadcasts.orderedView()[0].b.Message()[0]) != deadMsg {
 		t.Fatalf("expected queued dead msg")
 	}
 }
@@ -2160,7 +2232,7 @@ func TestMemberList_DeadNode_Refute(t *testing.T) {
 	}
 
 	// Should be alive mesg
-	if messageType(m.broadcasts.orderedView(true)[0].b.Message()[0]) != aliveMsg {
+	if messageType(m.broadcasts.orderedView()[0].b.Message()[0]) != aliveMsg {
 		t.Fatalf("expected queued alive msg")
 	}
 
@@ -2313,7 +2385,7 @@ func TestMemberlist_Gossip(t *testing.T) {
 
 	// Gossip should send all this to m2. Retry a few times because it's UDP and
 	// timing and stuff makes this flaky without.
-	retry(t, 15, 250*time.Millisecond, func(failf func(string, ...interface{})) {
+	retry(t, 15, 250*time.Millisecond, func(failf func(string, ...any)) {
 		m1.gossip()
 
 		time.Sleep(3 * time.Millisecond)
@@ -2324,13 +2396,13 @@ func TestMemberlist_Gossip(t *testing.T) {
 	})
 }
 
-func retry(t *testing.T, n int, w time.Duration, fn func(func(string, ...interface{}))) {
+func retry(t *testing.T, n int, w time.Duration, fn func(func(string, ...any))) {
 	t.Helper()
 	for try := 1; try <= n; try++ {
 		failed := false
 		failFormat := ""
-		failArgs := []interface{}{}
-		failf := func(format string, args ...interface{}) {
+		failArgs := []any{}
+		failf := func(format string, args ...any) {
 			failed = true
 			failFormat = format
 			failArgs = args
@@ -2398,7 +2470,7 @@ func TestMemberlist_GossipToDead(t *testing.T) {
 	// Should gossip to m2 because its state has changed within GossipToTheDeadTime
 	m1.nodeMap[addr2.String()].StateChange = time.Now().Add(-20 * time.Millisecond)
 
-	retry(t, 5, 10*time.Millisecond, func(failf func(string, ...interface{})) {
+	retry(t, 5, 10*time.Millisecond, func(failf func(string, ...any)) {
 		m1.gossip()
 
 		time.Sleep(3 * time.Millisecond)
@@ -2526,42 +2598,26 @@ func TestMemberlist_PushPull(t *testing.T) {
 			// Perform push/pull once, then use retry to wait for events to arrive
 			m1.pushPull()
 
-			retry(t, 5, 10*time.Millisecond, func(failf func(string, ...interface{})) {
-				// Each peer that receives push/pull gets join events for ALL nodes m1 knows about.
-				// m1 knows: [node1 (itself), node2, node3, ...] = 1 + numPeers nodes
-				// When pushed to a peer, that peer learns about all of them.
-				// Expected events per peer = numPeers + 1 (m1 + all other peers)
-				expectedEventsPerPeer := tt.numPeers + 1
-
-				// Track which peers received push/pull and validate each
-				totalEvents := 0
-				peersWithEvents := 0
-				for i := 0; i < tt.numPeers; i++ {
-					numEvents := len(channels[i])
-					if numEvents > 0 {
-						peersWithEvents++
-						totalEvents += numEvents
-
-						// Each participating peer must receive at least expectedEventsPerPeer
-						if numEvents < expectedEventsPerPeer {
-							failf("peer node%d: expected at least %d events, got %d", i+2, expectedEventsPerPeer, numEvents) // +2 because nodes are node1, node2, node3
-						}
+			require.Eventually(t, func() bool {
+				for _, ch := range channels {
+					if len(ch) < tt.numPeers+1 {
+						return false
 					}
 				}
-
-				// Verify correct number of peers participated in push/pull
-				if peersWithEvents < tt.pushPullNodes {
-					failf("expected all peers to receive push/pull, but %d peers got events", tt.pushPullNodes, peersWithEvents)
+				missing := map[string]bool{"consul.usage.test.memberlist.size.local": true}
+				for _, state := range []NodeStateType{StateAlive, StateDead, StateLeft, StateSuspect} {
+					name := fmt.Sprintf("consul.usage.test.memberlist.node.instances;node_state=%s", state.metricsString())
+					missing[name] = true
 				}
-
-				// Verify metrics
-				instancesMetricName := "consul.usage.test.memberlist.node.instances"
-				verifyGaugeExists(t, "consul.usage.test.memberlist.size.local", sink)
-				verifyGaugeExists(t, fmt.Sprintf("%s;node_state=%s", instancesMetricName, StateAlive.metricsString()), sink)
-				verifyGaugeExists(t, fmt.Sprintf("%s;node_state=%s", instancesMetricName, StateDead.metricsString()), sink)
-				verifyGaugeExists(t, fmt.Sprintf("%s;node_state=%s", instancesMetricName, StateLeft.metricsString()), sink)
-				verifyGaugeExists(t, fmt.Sprintf("%s;node_state=%s", instancesMetricName, StateSuspect.metricsString()), sink)
-			})
+				for _, interval := range sink.Data() {
+					interval.RLock()
+					for name := range interval.Gauges {
+						delete(missing, name)
+					}
+					interval.RUnlock()
+				}
+				return len(missing) == 0
+			}, time.Second, 10*time.Millisecond, "push/pull events and metrics must arrive for every selected peer")
 		})
 	}
 }
@@ -2694,8 +2750,8 @@ func testVerifyProtocolSingle(t *testing.T, A [][6]uint8, B [][6]uint8, expect b
 
 func registerInMemorySink(t *testing.T) *metrics.InmemSink {
 	t.Helper()
-	// Only have a single interval for the test
-	sink := metrics.NewInmemSink(1*time.Minute, 1*time.Minute)
+	// Retain the previous interval so minute boundaries do not discard test metrics.
+	sink := metrics.NewInmemSink(time.Minute, 2*time.Minute)
 	cfg := metrics.DefaultConfig("consul.usage.test")
 	cfg.EnableHostname = false
 	if _, err := metrics.NewGlobal(cfg, sink); err != nil {
@@ -2704,31 +2760,17 @@ func registerInMemorySink(t *testing.T) *metrics.InmemSink {
 	return sink
 }
 
-func getIntervalMetrics(t *testing.T, sink *metrics.InmemSink) *metrics.IntervalMetrics {
-	t.Helper()
-	intervals := sink.Data()
-	require.Len(t, intervals, 1)
-	intv := intervals[0]
-	return intv
-}
-
-func verifyGaugeExists(t *testing.T, name string, sink *metrics.InmemSink) {
-	t.Helper()
-	interval := getIntervalMetrics(t, sink)
-	interval.RLock()
-	defer interval.RUnlock()
-	if _, ok := interval.Gauges[name]; !ok {
-		t.Fatalf("%s gauge not emmited", name)
-	}
-}
-
 func verifySampleExists(t *testing.T, name string, sink *metrics.InmemSink) {
 	t.Helper()
-	interval := getIntervalMetrics(t, sink)
-	interval.RLock()
-	defer interval.RUnlock()
-
-	if _, ok := interval.Samples[name]; !ok {
-		t.Fatalf("%s sample not emmited", name)
-	}
+	require.Eventually(t, func() bool {
+		for _, interval := range sink.Data() {
+			interval.RLock()
+			_, ok := interval.Samples[name]
+			interval.RUnlock()
+			if ok {
+				return true
+			}
+		}
+		return false
+	}, time.Second, time.Millisecond, "%s sample not emitted", name)
 }

@@ -115,18 +115,6 @@ func decompressBuffer(c *compressedPayload) ([]byte, error) {
 	}
 }
 
-// maxDecompressBytes bounds the decompressed size of any compressed
-// memberlist payload, irrespective of algorithm. Memberlist's TCP push-pull
-// is capped at maxPushStateBytes (20 MiB compressed input) and UDP packets
-// at UDPBufferSize (default 1400 B), so legitimate decoded output sits well
-// below this. The 1 MiB headroom absorbs any compressed-frame metadata
-// expansion. Anything larger indicates a malformed peer or a decompression
-// bomb — LZW can expand small inputs by orders of magnitude on highly
-// redundant data, and snappy.Decode allocates the *claimed* decoded length
-// before reading data, so a tiny frame claiming a multi-GiB body could
-// trigger out-of-memory without this cap.
-const maxDecompressBytes = maxPushStateBytes + 1<<20
-
 // Hoisted metric-name slices, to avoid heap allocation on hot path.
 var (
 	metricCompressAttempts   = []string{"memberlist", "compress", "attempts_total"}

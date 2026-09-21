@@ -1,4 +1,4 @@
-// Copyright (c) HashiCorp, Inc.
+// Copyright IBM Corp. 2013, 2026
 // SPDX-License-Identifier: MPL-2.0
 
 package memberlist
@@ -7,13 +7,13 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"hash/crc32"
 	"io"
 	"math"
 	"net"
 	"slices"
-	"sync/atomic"
 	"time"
 
 	metrics "github.com/hashicorp/go-metrics"
@@ -81,7 +81,11 @@ const (
 	userMsgOverhead        = 1
 	blockingWarning        = 10 * time.Millisecond // Warn if a UDP packet takes this long to process
 	maxPushStateBytes      = 20 * 1024 * 1024
-	maxPushPullRequests    = 128 // Maximum number of concurrent push/pull requests
+	maxPushStateNodes      = 1024 * 1024      // Each requires conservatively  ~20 bytes when encoded
+	maxUserMsgBytes        = 20 * 1024 * 1024 // Largest user message we will buffer off the wire
+	maxPushPullRequests    = 128              // Maximum number of concurrent push/pull requests
+
+	maxDecompressedBytes = 2 * maxPushStateBytes // Largest push/pull we will decompress: user state plus an equal node budget
 )
 
 // ping request sent directly to node
@@ -286,8 +290,8 @@ func (m *Memberlist) handleConn(conn net.Conn) {
 		}
 	case pushPullMsg:
 		// Increment counter of pending push/pulls
-		numConcurrent := atomic.AddUint32(&m.pushPullReq, 1)
-		defer atomic.AddUint32(&m.pushPullReq, ^uint32(0))
+		numConcurrent := m.pushPullReq.Add(1)
+		defer m.pushPullReq.Add(^uint32(0))
 
 		// Check if we have too many open push/pull requests
 		if numConcurrent >= maxPushPullRequests {
@@ -745,7 +749,7 @@ func (m *Memberlist) handleDead(buf []byte, from net.Addr) {
 }
 
 // handleUser is used to notify channels of incoming user data
-func (m *Memberlist) handleUser(buf []byte, from net.Addr) {
+func (m *Memberlist) handleUser(buf []byte, _ net.Addr) {
 	d := m.config.Delegate
 	if d != nil {
 		d.NotifyMsg(buf)
@@ -792,7 +796,7 @@ func (m *Memberlist) handleCompressed(buf []byte, from net.Addr, timestamp time.
 }
 
 // encodeAndSendMsg is used to combine the encoding and sending steps
-func (m *Memberlist) encodeAndSendMsg(a Address, msgType messageType, msg interface{}) error {
+func (m *Memberlist) encodeAndSendMsg(a Address, msgType messageType, msg any) error {
 	out, err := encode(msgType, msg, m.config.MsgpackUseNewTimeFormat)
 	if err != nil {
 		return err
@@ -875,10 +879,10 @@ func (m *Memberlist) rawSendMsgPacket(a Address, node *Node, msg []byte) error {
 		}
 		m.nodeLock.RLock()
 		nodeState, ok := m.nodeMap[toAddr]
-		m.nodeLock.RUnlock()
 		if ok {
 			node = &nodeState.Node
 		}
+		m.nodeLock.RUnlock()
 	}
 
 	// Add a CRC to the end of the payload if the recipient understands
@@ -1266,6 +1270,9 @@ func (m *Memberlist) readStream(conn net.Conn, streamLabel string) (messageType,
 				m.decompressLabels(c.Algo))
 			return 0, nil, nil, err
 		}
+		if len(decomp) == 0 {
+			return 0, nil, nil, errors.New("decompressed message is empty")
+		}
 
 		// Reset the message type
 		msgType = messageType(decomp[0])
@@ -1288,6 +1295,10 @@ func (m *Memberlist) readRemoteState(bufConn io.Reader, dec *codec.Decoder) (boo
 		return false, nil, nil, err
 	}
 
+	if header.Nodes < 0 || header.Nodes > maxPushStateNodes {
+		return false, nil, nil, fmt.Errorf("number of nodes in header (%d) exceeds limit", header.Nodes)
+	}
+
 	// Allocate space for the transfer
 	remoteNodes := make([]pushNodeState, header.Nodes)
 
@@ -1296,6 +1307,10 @@ func (m *Memberlist) readRemoteState(bufConn io.Reader, dec *codec.Decoder) (boo
 		if err := dec.Decode(&remoteNodes[i]); err != nil {
 			return false, nil, nil, err
 		}
+	}
+
+	if header.UserStateLen < 0 || header.UserStateLen > maxPushStateBytes {
+		return false, nil, nil, fmt.Errorf("user state length (%d) exceeds limit", header.UserStateLen)
 	}
 
 	// Read the remote user state into a buffer
@@ -1334,19 +1349,22 @@ func (m *Memberlist) mergeRemoteState(join bool, remoteNodes []pushNodeState, us
 	if join && m.config.Merge != nil {
 		nodes := make([]*Node, len(remoteNodes))
 		for idx, n := range remoteNodes {
-			nodes[idx] = &Node{
+			node := &Node{
 				Name:  n.Name,
 				Addr:  n.Addr,
 				Port:  n.Port,
 				Meta:  n.Meta,
 				State: n.State,
-				PMin:  n.Vsn[0],
-				PMax:  n.Vsn[1],
-				PCur:  n.Vsn[2],
-				DMin:  n.Vsn[3],
-				DMax:  n.Vsn[4],
-				DCur:  n.Vsn[5],
 			}
+			if len(n.Vsn) >= 6 {
+				node.PMin = n.Vsn[0]
+				node.PMax = n.Vsn[1]
+				node.PCur = n.Vsn[2]
+				node.DMin = n.Vsn[3]
+				node.DMax = n.Vsn[4]
+				node.DCur = n.Vsn[5]
+			}
+			nodes[idx] = node
 		}
 		if err := m.config.Merge.NotifyMerge(nodes); err != nil {
 			return err
@@ -1369,6 +1387,10 @@ func (m *Memberlist) readUserMsg(bufConn io.Reader, dec *codec.Decoder) error {
 	var header userMsgHeader
 	if err := dec.Decode(&header); err != nil {
 		return err
+	}
+
+	if header.UserMsgLen < 0 || header.UserMsgLen > maxUserMsgBytes {
+		return fmt.Errorf("user message length (%d) exceeds limit", header.UserMsgLen)
 	}
 
 	// Read the user message into a buffer

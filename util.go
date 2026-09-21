@@ -1,4 +1,4 @@
-// Copyright (c) HashiCorp, Inc.
+// Copyright IBM Corp. 2013, 2026
 // SPDX-License-Identifier: MPL-2.0
 
 package memberlist
@@ -10,6 +10,7 @@ import (
 	"math"
 	"math/rand"
 	"net"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -31,7 +32,7 @@ func init() {
 }
 
 // Decode reverses the encode operation on a byte slice input
-func decode(buf []byte, out interface{}) error {
+func decode(buf []byte, out any) error {
 	r := bytes.NewReader(buf)
 	hd := codec.MsgpackHandle{}
 	dec := codec.NewDecoder(r, &hd)
@@ -205,16 +206,37 @@ func kRandomNodes(k int, nodes []*NodeState, delegate NodeSelectionDelegate, exc
 
 	n := len(nodes)
 
+	// When n is very small (ex. 3-5 node Raft clusters), we can easily miss
+	// non-excluded nodes with random selection, so instead shuffle the slice
+	// to ensure the search is exhaustive
+	if n < k*3 {
+		nodes := slices.Clone(nodes)
+		shuffleNodes(nodes)
+	NEXT:
+		for idx := 0; idx < n && len(kNodes) < k; idx++ {
+			state := nodes[idx]
+			if exclude != nil && exclude(state) {
+				continue
+			}
+			// The delegate's preferred node may also be in the selected pool.
+			for _, node := range kNodes {
+				if node.Name == state.Name {
+					continue NEXT
+				}
+			}
+			kNodes = append(kNodes, state.Node)
+		}
+		return kNodes
+	}
+
 OUTER:
-	// Probe up to 3*n times, with large n this is not necessary
-	// since k << n, but with small n we want search to be
-	// exhaustive
+	// Probe up to 3*n times, with large n this is not necessary since k << n,
+	// but when n >= k*3 but still not "large", we want to give the search a shot
+	// at being exhaustive
 	for i := 0; i < 3*n && len(kNodes) < k; i++ {
-		// Get random nodeState
 		idx := randomOffset(n)
 		state := nodes[idx]
 
-		// Give the filter a shot at it.
 		if exclude != nil && exclude(state) {
 			continue OUTER
 		}
@@ -226,7 +248,6 @@ OUTER:
 			}
 		}
 
-		// Append the node
 		kNodes = append(kNodes, state.Node)
 	}
 	return kNodes
@@ -333,7 +354,7 @@ func decodeCompoundMessage(buf []byte) (trunc int, parts [][]byte, err error) {
 
 	// Decode the lengths
 	lengths := make([]uint16, numParts)
-	for i := 0; i < numParts; i++ {
+	for i := range numParts {
 		lengths[i] = binary.BigEndian.Uint16(buf[i*2 : i*2+2])
 	}
 	buf = buf[numParts*2:]

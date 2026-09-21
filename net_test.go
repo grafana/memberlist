@@ -1,4 +1,4 @@
-// Copyright (c) HashiCorp, Inc.
+// Copyright IBM Corp. 2013, 2026
 // SPDX-License-Identifier: MPL-2.0
 
 package memberlist
@@ -76,7 +76,7 @@ func TestHandleCompoundPing(t *testing.T) {
 		}
 	}()
 
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		in := make([]byte, 1500)
 		n, _, err := udp.ReadFrom(in)
 		if err != nil {
@@ -300,6 +300,29 @@ func TestHandleIndirectPing(t *testing.T) {
 }
 
 func TestTCPPing(t *testing.T) {
+	t.Run("empty compressed payload", func(t *testing.T) {
+		for _, typ := range []compressionType{lzwCompressionType, snappyCompressionType} {
+			t.Run(compressionTypeLabel(typ), func(t *testing.T) {
+				m := &Memberlist{config: DefaultLANConfig()}
+				m.initCompressionMetricLabels()
+				buf, err := compressPayload(typ, nil, false)
+				require.NoError(t, err)
+				client, server := net.Pipe()
+				t.Cleanup(func() { _ = client.Close(); _ = server.Close() })
+				require.NoError(t, client.SetDeadline(time.Now().Add(5*time.Second)))
+				require.NoError(t, server.SetDeadline(time.Now().Add(5*time.Second)))
+				written := make(chan error, 1)
+				go func() {
+					_, err := server.Write(buf)
+					written <- err
+				}()
+				_, _, _, err = m.readStream(client, "")
+				require.EqualError(t, err, "decompressed message is empty")
+				require.NoError(t, <-written)
+			})
+		}
+	})
+
 	var tcp *net.TCPListener
 	var tcpAddr *net.TCPAddr
 	for port := 60000; port < 61000; port++ {
@@ -1063,6 +1086,124 @@ func TestHandleCommand(t *testing.T) {
 	}
 	m.handleCommand(nil, &net.TCPAddr{Port: 12345}, time.Now())
 	require.Contains(t, buf.String(), "missing message type byte")
+}
+
+func TestReadRemoteState_Limits(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		header pushPullHeader
+	}{
+		{"negative nodes", pushPullHeader{Nodes: -1}},
+		{"negative user state", pushPullHeader{UserStateLen: -1}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			buf, err := encode(pushPullMsg, tc.header, false)
+			require.NoError(t, err)
+			reader := bytes.NewReader(buf[1:])
+			dec := codec.NewDecoder(reader, &codec.MsgpackHandle{})
+			m := &Memberlist{}
+			_, _, _, err = m.readRemoteState(reader, dec)
+			require.ErrorContains(t, err, "exceeds limit")
+		})
+	}
+
+	mockNet := &MockNetwork{}
+	tr := mockNet.NewTransport("node")
+	logs := &bytes.Buffer{}
+	logger := log.New(logs, "", 0)
+
+	m := GetMemberlist(t, func(c *Config) {
+		c.EnableCompression = false
+		c.Logger = logger
+		c.Transport = tr
+		c.BindAddr = "127.0.0.1"
+		c.BindPort = 1
+	})
+	t.Cleanup(func() { _ = m.Shutdown() })
+
+	addr := joinHostPort(m.config.BindAddr, uint16(m.config.BindPort))
+
+	t.Run("nodes", func(t *testing.T) {
+		msg := pushPullHeader{Nodes: 10_000_000, UserStateLen: 100, Join: false}
+		buf, err := encode(pushPullMsg, msg, m.config.MsgpackUseNewTimeFormat)
+		require.NoError(t, err)
+
+		conn, err := tr.DialTimeout(addr, time.Millisecond*100)
+		require.NoError(t, err)
+
+		err = m.rawSendMsgStream(conn, buf, "")
+		require.NoError(t, err)
+
+		// conn closed: get nothing back
+		var out []byte
+		_, err = conn.Read(out)
+		require.Error(t, err, "EOF")
+		require.Contains(t, logs.String(),
+			"number of nodes in header (10000000) exceeds limit")
+	})
+
+	t.Run("user_state", func(t *testing.T) {
+		msg := pushPullHeader{Nodes: 0, UserStateLen: 30_000_000, Join: false}
+		buf, err := encode(pushPullMsg, msg, m.config.MsgpackUseNewTimeFormat)
+		require.NoError(t, err)
+
+		conn, err := tr.DialTimeout(addr, time.Millisecond*100)
+		require.NoError(t, err)
+
+		err = m.rawSendMsgStream(conn, buf, "")
+		require.NoError(t, err)
+
+		// conn closed: get nothing back
+		var out []byte
+		_, err = conn.Read(out)
+		require.Error(t, err, "EOF")
+		require.Contains(t, logs.String(),
+			"user state length (30000000) exceeds limit")
+	})
+}
+
+func TestReadUserMsg_Limit(t *testing.T) {
+	t.Run("negative length", func(t *testing.T) {
+		buf, err := encode(userMsg, userMsgHeader{UserMsgLen: -1}, false)
+		require.NoError(t, err)
+		reader := bytes.NewReader(buf[1:])
+		dec := codec.NewDecoder(reader, &codec.MsgpackHandle{})
+		m := &Memberlist{}
+		require.ErrorContains(t, m.readUserMsg(reader, dec), "exceeds limit")
+	})
+
+	mockNet := &MockNetwork{}
+	tr := mockNet.NewTransport("node")
+	logs := &bytes.Buffer{}
+	logger := log.New(logs, "", 0)
+
+	m := GetMemberlist(t, func(c *Config) {
+		c.EnableCompression = false
+		c.Logger = logger
+		c.Transport = tr
+		c.BindAddr = "127.0.0.1"
+		c.BindPort = 1
+	})
+	t.Cleanup(func() { _ = m.Shutdown() })
+
+	addr := joinHostPort(m.config.BindAddr, uint16(m.config.BindPort))
+
+	msg := userMsgHeader{UserMsgLen: 30_000_000}
+	buf, err := encode(userMsg, msg, m.config.MsgpackUseNewTimeFormat)
+	require.NoError(t, err)
+
+	conn, err := tr.DialTimeout(addr, time.Millisecond*100)
+	require.NoError(t, err)
+
+	err = m.rawSendMsgStream(conn, buf, "")
+	require.NoError(t, err)
+
+	// conn closed: get nothing back
+	var out []byte
+	_, err = conn.Read(out)
+	require.ErrorContains(t, err, "EOF")
+	require.Contains(t, logs.String(),
+		"user message length (30000000) exceeds limit")
 }
 
 func TestHandleConn_NilConnAfterRemoveLabelHeaderFromStream(t *testing.T) {

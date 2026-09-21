@@ -1,5 +1,4 @@
-# memberlist [![GoDoc](https://godoc.org/github.com/hashicorp/memberlist?status.png)](https://godoc.org/github.com/hashicorp/memberlist) [![CircleCI](https://circleci.com/gh/hashicorp/memberlist.svg?style=svg)](https://circleci.com/gh/hashicorp/memberlist)
-
+# memberlist [![GoDoc](https://godoc.org/github.com/hashicorp/memberlist?status.png)](https://godoc.org/github.com/hashicorp/memberlist)
 memberlist is a [Go](http://www.golang.org) library that manages cluster
 membership and member failure detection using a gossip based protocol.
 
@@ -72,11 +71,13 @@ convergence rate.
 For details on all of these extensions, please read our paper "[Lifeguard : SWIM-ing with Situational Awareness](https://arxiv.org/abs/1707.00788)", along with the memberlist source.  We welcome any questions related
 to the protocol on our issue tracker.
 
-## Metrics Emission
+## Metrics
 
-This library emits metrics using `github.com/hashicorp/go-metrics`.
+Memberlist emits metrics through `github.com/hashicorp/go-metrics`. Configure
+that package's global sink and use its `Label` type for `Config.MetricLabels`
+and `NetTransportConfig.MetricLabels`.
 
-Applications should configure the global `hashicorp/go-metrics` sink they want
-memberlist metrics to use. Memberlist no longer routes metrics through
-`github.com/armon/go-metrics` or the `github.com/hashicorp/go-metrics/compat`
-build-tag bridge.
+Applications migrating from `github.com/armon/go-metrics` must update both
+their label values and sink initialization to the HashiCorp package. The
+`armonmetrics` and `hashicorpmetrics` build tags no longer select memberlist's
+metrics backend.

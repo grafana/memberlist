@@ -119,7 +119,7 @@ func BenchmarkLZWReaderPool(b *testing.B) {
 			b.ReportAllocs()
 			for b.Loop() {
 				r := lzw.NewReader(bytes.NewReader(compressed), lzw.LSB, lzwLitWidth).(*lzw.Reader)
-				lr := io.LimitedReader{R: r, N: maxDecompressBytes + 1}
+				lr := io.LimitedReader{R: r, N: maxDecompressedBytes + 1}
 				var buf bytes.Buffer
 				_, err := io.Copy(&buf, &lr)
 				require.NoError(b, err)

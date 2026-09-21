@@ -1,4 +1,4 @@
-// Copyright (c) HashiCorp, Inc.
+// Copyright IBM Corp. 2013, 2026
 // SPDX-License-Identifier: MPL-2.0
 
 package memberlist
@@ -581,7 +581,7 @@ func (m *Memberlist) resetNodes() {
 	m.nodes = m.nodes[0:deadIdx]
 
 	// Update numNodes after we've trimmed the dead nodes
-	atomic.StoreUint32(&m.numNodes, uint32(deadIdx))
+	m.numNodes.Store(uint32(deadIdx))
 
 	// Shuffle live nodes
 	shuffleNodes(m.nodes)
@@ -721,9 +721,8 @@ func (m *Memberlist) verifyProtocol(remote []pushNodeState) error {
 			continue
 		}
 
-		// Skip nodes that don't have versions set, it just means
-		// their version is zero.
-		if len(rn.Vsn) == 0 {
+		// Skip nodes that don't have proper version info
+		if len(rn.Vsn) < 5 {
 			continue
 		}
 
@@ -772,7 +771,7 @@ func (m *Memberlist) verifyProtocol(remote []pushNodeState) error {
 	// node in the cluster satisifies this.
 	for _, n := range remote {
 		var nPCur, nDCur uint8
-		if len(n.Vsn) > 0 {
+		if len(n.Vsn) >= 6 {
 			nPCur = n.Vsn[2]
 			nDCur = n.Vsn[5]
 		}
@@ -817,17 +816,17 @@ func (m *Memberlist) nextSeqNo() uint32 {
 
 // nextIncarnation returns the next incarnation number in a thread safe way
 func (m *Memberlist) nextIncarnation() uint32 {
-	return atomic.AddUint32(&m.incarnation, 1)
+	return m.incarnation.Add(1)
 }
 
 // skipIncarnation adds the positive offset to the incarnation number.
 func (m *Memberlist) skipIncarnation(offset uint32) uint32 {
-	return atomic.AddUint32(&m.incarnation, offset)
+	return m.incarnation.Add(offset)
 }
 
 // estNumNodes is used to get the current estimate of the number of nodes
 func (m *Memberlist) estNumNodes() int {
-	return int(atomic.LoadUint32(&m.numNodes))
+	return int(m.numNodes.Load())
 }
 
 type ackMessage struct {
@@ -855,14 +854,9 @@ func (m *Memberlist) setProbeChannels(seqNo uint32, ackCh chan ackMessage, nackC
 		}
 	}
 
-	// Add the handlers
-	ah := &ackHandler{ackFn, nackFn, nil}
+	// Initialize and publish under the same lock as timeout and ack handling.
 	m.ackLock.Lock()
-	m.ackHandlers[seqNo] = ah
-	m.ackLock.Unlock()
-
-	// Setup a reaping routing
-	ah.timer = time.AfterFunc(timeout, func() {
+	ah := &ackHandler{ackFn, nackFn, time.AfterFunc(timeout, func() {
 		m.ackLock.Lock()
 		delete(m.ackHandlers, seqNo)
 		m.ackLock.Unlock()
@@ -870,7 +864,10 @@ func (m *Memberlist) setProbeChannels(seqNo uint32, ackCh chan ackMessage, nackC
 		case ackCh <- ackMessage{false, nil, time.Now()}:
 		default:
 		}
-	})
+	})}
+
+	m.ackHandlers[seqNo] = ah
+	m.ackLock.Unlock()
 }
 
 // setAckHandler is used to attach a handler to be invoked when an ack with a
@@ -878,18 +875,15 @@ func (m *Memberlist) setProbeChannels(seqNo uint32, ackCh chan ackMessage, nackC
 // deleted. This is used for indirect pings so does not configure a function
 // for nacks.
 func (m *Memberlist) setAckHandler(seqNo uint32, ackFn func([]byte, time.Time), timeout time.Duration) {
-	// Add the handler
-	ah := &ackHandler{ackFn, nil, nil}
+	// Initialize and publish under the same lock as timeout and ack handling.
 	m.ackLock.Lock()
-	m.ackHandlers[seqNo] = ah
-	m.ackLock.Unlock()
-
-	// Setup a reaping routing
-	ah.timer = time.AfterFunc(timeout, func() {
+	ah := &ackHandler{ackFn, nil, time.AfterFunc(timeout, func() {
 		m.ackLock.Lock()
 		delete(m.ackHandlers, seqNo)
 		m.ackLock.Unlock()
-	})
+	})}
+	m.ackHandlers[seqNo] = ah
+	m.ackLock.Unlock()
 }
 
 // Invokes an ack handler if any is associated, and reaps the handler immediately
@@ -1043,7 +1037,7 @@ func (m *Memberlist) aliveNode(a *alive, notify chan struct{}, bootstrap bool) {
 		m.nodes[offset], m.nodes[n] = m.nodes[n], m.nodes[offset]
 
 		// Update numNodes after we've added a new node
-		atomic.AddUint32(&m.numNodes, 1)
+		m.numNodes.Add(1)
 	} else {
 		// Check if this address is different than the existing node unless the old node is dead.
 		if !bytes.Equal([]byte(state.Addr), a.Addr) || state.Port != a.Port {
@@ -1128,7 +1122,7 @@ func (m *Memberlist) aliveNode(a *alive, notify chan struct{}, bootstrap bool) {
 		m.encodeBroadcastNotify(a.Node, aliveMsg, a, notify)
 
 		// Update protocol versions if it arrived
-		if len(a.Vsn) > 0 {
+		if len(a.Vsn) >= 6 {
 			state.PMin = a.Vsn[0]
 			state.PMax = a.Vsn[1]
 			state.PCur = a.Vsn[2]
