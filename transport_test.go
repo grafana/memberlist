@@ -4,6 +4,8 @@
 package memberlist
 
 import (
+	"bytes"
+	"io"
 	"log"
 	"net"
 	"strings"
@@ -68,6 +70,33 @@ func TestTransport_Join(t *testing.T) {
 		t.Fatalf("bad: %v", m2.Members())
 	}
 
+	t.Run("large delegate state", func(t *testing.T) {
+		for _, algo := range []CompressionAlgorithm{"none", CompressionAlgorithmLZW, CompressionAlgorithmSnappy} {
+			t.Run(string(algo), func(t *testing.T) {
+				network := &MockNetwork{}
+				seed, _, seedDelegate := newStreamTestMemberlist(t, network, "seed", algo)
+				joiner, _, joinerDelegate := newStreamTestMemberlist(t, network, "joiner", algo)
+				seedState := bytes.Repeat([]byte{'s'}, maxPushStateBytes+1)
+				joinerState := bytes.Repeat([]byte{'j'}, maxPushStateBytes+1)
+				seedDelegate.setState(seedState)
+				joinerDelegate.setState(joinerState)
+
+				n, err := joiner.Join([]string{seed.config.Name + "/" + seed.LocalNode().Address()})
+				require.NoError(t, err)
+				require.Equal(t, 1, n)
+				seedReceived := seedDelegate.waitForMerge(t, joinerState, true)
+				joinerReceived := joinerDelegate.waitForMerge(t, seedState, true)
+
+				seedDelegate.setState(joinerState)
+				joinerDelegate.setState(seedState)
+				require.NoError(t, joiner.pushPullNode(seed.LocalNode().FullAddress(), false))
+				seedDelegate.waitForMerge(t, seedState, false)
+				joinerDelegate.waitForMerge(t, joinerState, false)
+				require.True(t, bytes.Equal(seedReceived, joinerState), "previous delegate state was overwritten")
+				require.True(t, bytes.Equal(joinerReceived, seedState), "previous delegate state was overwritten")
+			})
+		}
+	})
 }
 
 func TestTransport_Send(t *testing.T) {
@@ -159,6 +188,110 @@ func TestTransport_Send(t *testing.T) {
 	// Some of these are UDP so often get re-ordered making the test flaky if we
 	// assert send ordering. Sort both slices to be tolerant of re-ordering.
 	require.ElementsMatch(t, expected, received)
+
+	t.Run("reliable size limits", func(t *testing.T) {
+		payload := bytes.Repeat([]byte{'m'}, maxUserMsgBytes+1)
+		for _, algo := range []CompressionAlgorithm{"none", CompressionAlgorithmLZW, CompressionAlgorithmSnappy} {
+			t.Run(string(algo), func(t *testing.T) {
+				network := &MockNetwork{}
+				receiver, _, delegate := newStreamTestMemberlist(t, network, "receiver", algo)
+				sender, transport, _ := newStreamTestMemberlist(t, network, "sender", algo)
+				for _, method := range []struct {
+					name string
+					send func(*Node, []byte) error
+				}{
+					{"SendReliable", sender.SendReliable},
+					{"SendToTCP", sender.SendToTCP},
+				} {
+					t.Run(method.name, func(t *testing.T) {
+						require.NoError(t, method.send(receiver.LocalNode(), payload[:maxUserMsgBytes]))
+						select {
+						case got := <-delegate.messages:
+							require.True(t, bytes.Equal(payload[:maxUserMsgBytes], got), "user message changed")
+						case <-time.After(10 * time.Second):
+							t.Fatal("user message was not delivered")
+						}
+
+						dials := transport.dials.Load()
+						require.ErrorContains(t, method.send(receiver.LocalNode(), payload), "user message length")
+						require.Equal(t, dials, transport.dials.Load(), "oversized message dialed the peer")
+					})
+				}
+
+				t.Run("required name takes precedence", func(t *testing.T) {
+					node := *receiver.LocalNode()
+					node.Name = ""
+					dials := transport.dials.Load()
+					require.ErrorIs(t, sender.SendReliable(&node, payload), errNodeNamesAreRequired)
+					require.Equal(t, dials, transport.dials.Load())
+				})
+			})
+		}
+	})
+}
+
+type streamTestTransport struct {
+	NodeAwareTransport
+	dials atomic.Int32
+}
+
+func (t *streamTestTransport) DialAddressTimeout(addr Address, timeout time.Duration) (net.Conn, error) {
+	t.dials.Add(1)
+	return t.NodeAwareTransport.DialAddressTimeout(addr, timeout)
+}
+
+type streamTestMerge struct {
+	state []byte
+	join  bool
+}
+
+type streamTestDelegate struct {
+	MockDelegate
+	messages chan []byte
+	merges   chan streamTestMerge
+}
+
+func (d *streamTestDelegate) NotifyMsg(msg []byte) {
+	d.messages <- bytes.Clone(msg)
+}
+
+func (d *streamTestDelegate) MergeRemoteState(state []byte, join bool) {
+	d.merges <- streamTestMerge{state: state, join: join}
+}
+
+func (d *streamTestDelegate) waitForMerge(t *testing.T, want []byte, join bool) []byte {
+	t.Helper()
+	select {
+	case got := <-d.merges:
+		require.Equal(t, join, got.join)
+		require.True(t, bytes.Equal(want, got.state), "delegate state changed")
+		return got.state
+	case <-time.After(10 * time.Second):
+		t.Fatal("delegate state was not merged")
+		return nil
+	}
+}
+
+func newStreamTestMemberlist(t *testing.T, network *MockNetwork, name string, algo CompressionAlgorithm) (*Memberlist, *streamTestTransport, *streamTestDelegate) {
+	t.Helper()
+	transport := &streamTestTransport{NodeAwareTransport: network.NewTransport(name)}
+	delegate := &streamTestDelegate{messages: make(chan []byte, 1), merges: make(chan streamTestMerge, 1)}
+	config := DefaultLANConfig()
+	config.Name = name
+	config.BindAddr = "127.0.0.1"
+	config.Transport = transport
+	config.Delegate = delegate
+	config.RequireNodeNames = true
+	config.ProbeInterval, config.PushPullInterval, config.GossipInterval = 0, 0, 0
+	config.EnableCompression = algo != "none"
+	if config.EnableCompression {
+		config.CompressionAlgorithm = algo
+	}
+	config.Logger = log.New(io.Discard, "", 0)
+	m, err := Create(config)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, m.Shutdown()) })
+	return m, transport, delegate
 }
 
 type testCountingWriter struct {

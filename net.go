@@ -85,7 +85,7 @@ const (
 	maxUserMsgBytes        = 20 * 1024 * 1024 // Largest user message we will buffer off the wire
 	maxPushPullRequests    = 128              // Maximum number of concurrent push/pull requests
 
-	maxDecompressedBytes = 2 * maxPushStateBytes // Largest push/pull we will decompress: user state plus an equal node budget
+	maxDecompressedBytes = 2 * maxPushStateBytes // Maximum decompressed size of a compressed message
 )
 
 // ping request sent directly to node
@@ -968,6 +968,9 @@ func (m *Memberlist) sendUserMsg(a Address, sendBuf []byte) error {
 	if a.Name == "" && m.config.RequireNodeNames {
 		return errNodeNamesAreRequired
 	}
+	if len(sendBuf) > maxUserMsgBytes {
+		return fmt.Errorf("user message length (%d) exceeds limit (%d)", len(sendBuf), maxUserMsgBytes)
+	}
 
 	conn, err := m.transport.DialAddressTimeout(a, m.config.TCPTimeout)
 	if err != nil {
@@ -1298,6 +1301,9 @@ func (m *Memberlist) readRemoteState(bufConn io.Reader, dec *codec.Decoder) (boo
 	if header.Nodes < 0 || header.Nodes > maxPushStateNodes {
 		return false, nil, nil, fmt.Errorf("number of nodes in header (%d) exceeds limit", header.Nodes)
 	}
+	if header.UserStateLen < 0 {
+		return false, nil, nil, fmt.Errorf("user state length (%d) exceeds limit", header.UserStateLen)
+	}
 
 	// Allocate space for the transfer
 	remoteNodes := make([]pushNodeState, header.Nodes)
@@ -1309,23 +1315,19 @@ func (m *Memberlist) readRemoteState(bufConn io.Reader, dec *codec.Decoder) (boo
 		}
 	}
 
-	if header.UserStateLen < 0 || header.UserStateLen > maxPushStateBytes {
-		return false, nil, nil, fmt.Errorf("user state length (%d) exceeds limit", header.UserStateLen)
-	}
-
 	// Read the remote user state into a buffer
 	var userBuf []byte
 	if header.UserStateLen > 0 {
-		userBuf = make([]byte, header.UserStateLen)
-		bytes, err := io.ReadAtLeast(bufConn, userBuf, header.UserStateLen)
-		if err == nil && bytes != header.UserStateLen {
-			err = fmt.Errorf(
-				"failed to read full user state (%d / %d)",
-				bytes, header.UserStateLen)
+		// Grow with the received data rather than trusting the advertised length.
+		var buf bytes.Buffer
+		n, err := io.CopyN(&buf, bufConn, int64(header.UserStateLen))
+		if err == io.EOF && n > 0 {
+			err = io.ErrUnexpectedEOF
 		}
 		if err != nil {
 			return false, nil, nil, err
 		}
+		userBuf = buf.Bytes()
 	}
 
 	// For proto versions < 2, there is no port provided. Mask old

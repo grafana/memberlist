@@ -48,6 +48,9 @@
 
 ### Fixed
 
+- Reject reliable user messages above the 20 MiB receiver limit before dialing.
+- Preserve delegate-state transfers above 20 MiB while allocating incrementally
+  from received data instead of trusting the advertised state length.
 - Preserve missing-self handling in `Leave` and synchronize acknowledgement
   timer initialization with handler registration and expiry.
 - Exhaustively select eligible nodes from small pools while preserving
@@ -55,7 +58,7 @@
 
 ### Security
 
-- Reject invalid TCP node counts, user-state lengths, and user-message lengths,
+- Reject invalid TCP node counts, negative user-state lengths, and invalid user-message lengths,
   and reject empty compressed stream messages.
 - Allow up to 40 MiB of decompressed data for both LZW and Snappy, matching
   upstream's combined node and user-state budget. The previous fork limit was

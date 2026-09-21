@@ -6,6 +6,7 @@ package memberlist
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -14,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	"github.com/hashicorp/go-msgpack/v2/codec"
@@ -1095,6 +1097,7 @@ func TestReadRemoteState_Limits(t *testing.T) {
 	}{
 		{"negative nodes", pushPullHeader{Nodes: -1}},
 		{"negative user state", pushPullHeader{UserStateLen: -1}},
+		{"negative user state before nodes", pushPullHeader{Nodes: 1, UserStateLen: -1}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			buf, err := encode(pushPullMsg, tc.header, false)
@@ -1143,22 +1146,64 @@ func TestReadRemoteState_Limits(t *testing.T) {
 	})
 
 	t.Run("user_state", func(t *testing.T) {
-		msg := pushPullHeader{Nodes: 0, UserStateLen: 30_000_000, Join: false}
-		buf, err := encode(pushPullMsg, msg, m.config.MsgpackUseNewTimeFormat)
-		require.NoError(t, err)
+		readErr := errors.New("read failed")
+		for _, tc := range []struct {
+			name   string
+			length int
+			body   io.Reader
+			want   []byte
+			err    error
+		}{
+			{name: "zero", body: strings.NewReader("")},
+			{name: "empty truncated", length: 2, body: strings.NewReader(""), err: io.EOF},
+			{name: "partial truncated", length: 2, body: strings.NewReader("a"), err: io.ErrUnexpectedEOF},
+			{name: "complete", length: 2, body: strings.NewReader("ab"), want: []byte("ab")},
+			{name: "reader error", length: 2, body: io.MultiReader(strings.NewReader("a"), iotest.ErrReader(readErr)), err: readErr},
+			{name: "huge advertised length", length: int(^uint(0) >> 1), body: strings.NewReader("a"), err: io.ErrUnexpectedEOF},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				buf, err := encode(pushPullMsg, pushPullHeader{UserStateLen: tc.length}, false)
+				require.NoError(t, err)
+				reader := io.MultiReader(bytes.NewReader(buf[1:]), tc.body)
+				dec := codec.NewDecoder(reader, &codec.MsgpackHandle{})
+				_, _, state, err := m.readRemoteState(reader, dec)
+				require.ErrorIs(t, err, tc.err)
+				require.Equal(t, tc.want, state)
+			})
+		}
 
-		conn, err := tr.DialTimeout(addr, time.Millisecond*100)
-		require.NoError(t, err)
+		t.Run("trailing bytes and ownership", func(t *testing.T) {
+			for _, size := range []int{0, 3} {
+				buf, err := encode(pushPullMsg, pushPullHeader{UserStateLen: size}, false)
+				require.NoError(t, err)
+				buf = append(buf, []byte("abc")[:size]...)
+				buf = append(buf, "tail"...)
+				reader := bytes.NewReader(buf[1:])
+				dec := codec.NewDecoder(reader, &codec.MsgpackHandle{})
+				_, _, state, err := m.readRemoteState(reader, dec)
+				require.NoError(t, err)
+				trailing, err := io.ReadAll(reader)
+				require.NoError(t, err)
+				require.Equal(t, "tail", string(trailing))
+				clear(buf)
+				if size == 0 {
+					require.Nil(t, state)
+				} else {
+					require.Equal(t, "abc", string(state))
+				}
+			}
+		})
 
-		err = m.rawSendMsgStream(conn, buf, "")
-		require.NoError(t, err)
-
-		// conn closed: get nothing back
-		var out []byte
-		_, err = conn.Read(out)
-		require.Error(t, err, "EOF")
-		require.Contains(t, logs.String(),
-			"user state length (30000000) exceeds limit")
+		t.Run("plaintext above decompression limit", func(t *testing.T) {
+			state := bytes.Repeat([]byte{'s'}, maxDecompressedBytes+1)
+			buf, err := encode(pushPullMsg, pushPullHeader{UserStateLen: len(state)}, false)
+			require.NoError(t, err)
+			reader := io.MultiReader(bytes.NewReader(buf[1:]), bytes.NewReader(state))
+			dec := codec.NewDecoder(reader, &codec.MsgpackHandle{})
+			_, _, got, err := m.readRemoteState(reader, dec)
+			require.NoError(t, err)
+			require.True(t, bytes.Equal(state, got), "delegate state changed")
+		})
 	})
 }
 

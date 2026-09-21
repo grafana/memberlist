@@ -126,9 +126,12 @@ is enforced), the following are considered part of its threat model:
 - **Cross-cluster message confusion.** When a `Label` is configured, it is
   authenticated as GCM AAD, so messages authenticated for another logical
   cluster are not accepted.
-- **Bounded resource-exhaustion via oversized state.** Full-state sync is capped
-  (`maxPushStateBytes`), decompression output is bounded, the inbound message
-  handoff queue has a bounded depth, and `CIDRsAllowed` can constrain sources.
+- **Bounded resource-exhaustion via oversized state.** Encrypted stream bodies
+  are capped at 20 MiB, decompression output at 40 MiB, and reliable user-message
+  bodies at 20 MiB. Delegate state is read incrementally so an advertised length
+  alone cannot trigger a large allocation. Uncompressed plaintext delegate state
+  has no total size cap; its memory usage grows with received data. The inbound
+  message handoff queue has a bounded depth, and `CIDRsAllowed` can constrain sources.
   These provide partial protection against certain resource-exhaustion attacks
   (see the exclusions below for the limits of this).
 
