@@ -1,4 +1,4 @@
-// Copyright (c) HashiCorp, Inc.
+// Copyright IBM Corp. 2013, 2026
 // SPDX-License-Identifier: MPL-2.0
 
 package memberlist
@@ -77,7 +77,7 @@ func TestEncodeRoundTrip(t *testing.T) {
 
 func TestRandomOffset(t *testing.T) {
 	vals := make(map[int]struct{})
-	for i := 0; i < 100; i++ {
+	for range 100 {
 		offset := randomOffset(2 << 30)
 		if _, ok := vals[offset]; ok {
 			t.Fatalf("got collision")
@@ -233,7 +233,7 @@ func TestMoveDeadNodes(t *testing.T) {
 	if idx != 5 {
 		t.Fatalf("bad index")
 	}
-	for i := 0; i < idx; i++ {
+	for i := range idx {
 		switch i {
 		case 2:
 			// Recently dead node remains at index 2,
@@ -261,7 +261,7 @@ func TestMoveDeadNodes(t *testing.T) {
 
 func TestKRandomNodes(t *testing.T) {
 	nodes := []*NodeState{}
-	for i := 0; i < 90; i++ {
+	for i := range 90 {
 		// Half the nodes are in a bad state
 		state := StateAlive
 		switch i % 3 {
@@ -314,11 +314,65 @@ func TestKRandomNodes(t *testing.T) {
 			}
 		}
 	}
+
+	// make sure we test the very-small path
+	nodes = nodes[:8]
+	s4 := kRandomNodes(3, nodes, nil, filterFunc)
+	if len(s4) != 2 {
+		t.Fatalf("expected 2 nodes")
+	}
+	for _, n := range s4 {
+		if n.Name != "test3" && n.Name != "test6" {
+			t.Fatalf("unexpected node picked")
+		}
+	}
 }
 
 func TestKRandomNodesWithDelegate(t *testing.T) {
+	t.Run("small selected pool", func(t *testing.T) {
+		a := &NodeState{Node: Node{Name: "a"}}
+		b := &NodeState{Node: Node{Name: "b"}}
+		c := &NodeState{Node: Node{Name: "c"}}
+		for _, tc := range []struct {
+			name      string
+			selected  []*NodeState
+			preferred *NodeState
+			excluded  *NodeState
+			k         int
+			want      []string
+		}{
+			{"preferred in pool", []*NodeState{a, b, c}, a, nil, 3, []string{"a", "b", "c"}},
+			{"preferred outside pool", []*NodeState{b, c}, a, nil, 3, []string{"a", "b", "c"}},
+			{"excluded preferred", []*NodeState{a, b, c}, a, a, 3, []string{"b", "c"}},
+			{"no preferred", []*NodeState{a, b, c}, nil, b, 3, []string{"a", "c"}},
+			{"duplicate names", []*NodeState{a, a, b}, a, nil, 3, []string{"a", "b"}},
+			{"preferred fills request", []*NodeState{a, b}, c, nil, 1, []string{"c"}},
+			{"empty selected pool", nil, a, nil, 2, []string{"a"}},
+			{"zero requested", []*NodeState{a, b}, a, nil, 0, nil},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				original := append([]*NodeState(nil), tc.selected...)
+				delegate := &testNodeSelectionDelegate{
+					selectFunc: func([]*NodeState) ([]*NodeState, *NodeState) {
+						return tc.selected, tc.preferred
+					},
+				}
+				result := kRandomNodes(tc.k, tc.selected, delegate, func(n *NodeState) bool { return n == tc.excluded })
+				var names []string
+				for _, node := range result {
+					names = append(names, node.Name)
+				}
+				require.ElementsMatch(t, tc.want, names)
+				require.Equal(t, original, tc.selected, "selection must not reorder the delegate's slice")
+				if tc.preferred != nil && tc.preferred != tc.excluded && tc.k > 0 {
+					require.Equal(t, tc.preferred.Name, result[0].Name)
+				}
+			})
+		}
+	})
+
 	var nodes []*NodeState
-	for i := 0; i < 20; i++ {
+	for i := range 20 {
 		state := StateAlive
 		switch i % 3 {
 		case 0:
@@ -539,7 +593,7 @@ func TestMakeCompoundMessages(t *testing.T) {
 
 	// Generate some fixtures.
 	smallMessages := make([][]byte, 300)
-	for i := 0; i < len(smallMessages); i++ {
+	for i := range smallMessages {
 		msg := &ackResp{SeqNo: smallMsgSeqNo, Payload: []byte{byte(i)}}
 		encoded, err := encode(ackRespMsg, msg, false)
 		require.NoError(t, err)
@@ -547,7 +601,7 @@ func TestMakeCompoundMessages(t *testing.T) {
 	}
 
 	bigMessages := make([][]byte, 3)
-	for i := 0; i < len(bigMessages); i++ {
+	for i := range bigMessages {
 		payload := []byte{bigMsgPayloadLength - 1: byte(i)}
 		require.Len(t, payload, bigMsgPayloadLength)
 
@@ -618,7 +672,7 @@ func TestMakeCompoundMessages(t *testing.T) {
 			assert.Equal(t, testData.expected, actual)
 
 			// Ensure we can successfully decode every message.
-			for i := 0; i < len(actual); i++ {
+			for i := range actual {
 				msg := actual[i]
 				typ := messageType(msg[0])
 
@@ -659,7 +713,7 @@ func TestMakeCompoundMessages(t *testing.T) {
 func BenchmarkKRandomNodes(b *testing.B) {
 	// Create 10K alive nodes
 	nodes := make([]*NodeState, 10000)
-	for i := 0; i < 10000; i++ {
+	for i := range 10000 {
 		nodes[i] = &NodeState{
 			Node:  Node{Name: fmt.Sprintf("node%d", i)},
 			State: StateAlive,

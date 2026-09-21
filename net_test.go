@@ -1,4 +1,4 @@
-// Copyright (c) HashiCorp, Inc.
+// Copyright IBM Corp. 2013, 2026
 // SPDX-License-Identifier: MPL-2.0
 
 package memberlist
@@ -6,6 +6,7 @@ package memberlist
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -14,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	"github.com/hashicorp/go-msgpack/v2/codec"
@@ -76,7 +78,7 @@ func TestHandleCompoundPing(t *testing.T) {
 		}
 	}()
 
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		in := make([]byte, 1500)
 		n, _, err := udp.ReadFrom(in)
 		if err != nil {
@@ -300,6 +302,29 @@ func TestHandleIndirectPing(t *testing.T) {
 }
 
 func TestTCPPing(t *testing.T) {
+	t.Run("empty compressed payload", func(t *testing.T) {
+		for _, typ := range []compressionType{lzwCompressionType, snappyCompressionType} {
+			t.Run(compressionTypeLabel(typ), func(t *testing.T) {
+				m := &Memberlist{config: DefaultLANConfig()}
+				m.initCompressionMetricLabels()
+				buf, err := compressPayload(typ, nil, false)
+				require.NoError(t, err)
+				client, server := net.Pipe()
+				t.Cleanup(func() { _ = client.Close(); _ = server.Close() })
+				require.NoError(t, client.SetDeadline(time.Now().Add(5*time.Second)))
+				require.NoError(t, server.SetDeadline(time.Now().Add(5*time.Second)))
+				written := make(chan error, 1)
+				go func() {
+					_, err := server.Write(buf)
+					written <- err
+				}()
+				_, _, _, err = m.readStream(client, "")
+				require.EqualError(t, err, "decompressed message is empty")
+				require.NoError(t, <-written)
+			})
+		}
+	})
+
 	var tcp *net.TCPListener
 	var tcpAddr *net.TCPAddr
 	for port := 60000; port < 61000; port++ {
@@ -1063,6 +1088,167 @@ func TestHandleCommand(t *testing.T) {
 	}
 	m.handleCommand(nil, &net.TCPAddr{Port: 12345}, time.Now())
 	require.Contains(t, buf.String(), "missing message type byte")
+}
+
+func TestReadRemoteState_Limits(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		header pushPullHeader
+	}{
+		{"negative nodes", pushPullHeader{Nodes: -1}},
+		{"negative user state", pushPullHeader{UserStateLen: -1}},
+		{"negative user state before nodes", pushPullHeader{Nodes: 1, UserStateLen: -1}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			buf, err := encode(pushPullMsg, tc.header, false)
+			require.NoError(t, err)
+			reader := bytes.NewReader(buf[1:])
+			dec := codec.NewDecoder(reader, &codec.MsgpackHandle{})
+			m := &Memberlist{}
+			_, _, _, err = m.readRemoteState(reader, dec)
+			require.ErrorContains(t, err, "exceeds limit")
+		})
+	}
+
+	mockNet := &MockNetwork{}
+	tr := mockNet.NewTransport("node")
+	logs := &bytes.Buffer{}
+	logger := log.New(logs, "", 0)
+
+	m := GetMemberlist(t, func(c *Config) {
+		c.EnableCompression = false
+		c.Logger = logger
+		c.Transport = tr
+		c.BindAddr = "127.0.0.1"
+		c.BindPort = 1
+	})
+	t.Cleanup(func() { _ = m.Shutdown() })
+
+	addr := joinHostPort(m.config.BindAddr, uint16(m.config.BindPort))
+
+	t.Run("nodes", func(t *testing.T) {
+		msg := pushPullHeader{Nodes: 10_000_000, UserStateLen: 100, Join: false}
+		buf, err := encode(pushPullMsg, msg, m.config.MsgpackUseNewTimeFormat)
+		require.NoError(t, err)
+
+		conn, err := tr.DialTimeout(addr, time.Millisecond*100)
+		require.NoError(t, err)
+
+		err = m.rawSendMsgStream(conn, buf, "")
+		require.NoError(t, err)
+
+		// conn closed: get nothing back
+		var out []byte
+		_, err = conn.Read(out)
+		require.Error(t, err, "EOF")
+		require.Contains(t, logs.String(),
+			"number of nodes in header (10000000) exceeds limit")
+	})
+
+	t.Run("user_state", func(t *testing.T) {
+		readErr := errors.New("read failed")
+		for _, tc := range []struct {
+			name   string
+			length int
+			body   io.Reader
+			want   []byte
+			err    error
+		}{
+			{name: "zero", body: strings.NewReader("")},
+			{name: "empty truncated", length: 2, body: strings.NewReader(""), err: io.EOF},
+			{name: "partial truncated", length: 2, body: strings.NewReader("a"), err: io.ErrUnexpectedEOF},
+			{name: "complete", length: 2, body: strings.NewReader("ab"), want: []byte("ab")},
+			{name: "reader error", length: 2, body: io.MultiReader(strings.NewReader("a"), iotest.ErrReader(readErr)), err: readErr},
+			{name: "huge advertised length", length: int(^uint(0) >> 1), body: strings.NewReader("a"), err: io.ErrUnexpectedEOF},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				buf, err := encode(pushPullMsg, pushPullHeader{UserStateLen: tc.length}, false)
+				require.NoError(t, err)
+				reader := io.MultiReader(bytes.NewReader(buf[1:]), tc.body)
+				dec := codec.NewDecoder(reader, &codec.MsgpackHandle{})
+				_, _, state, err := m.readRemoteState(reader, dec)
+				require.ErrorIs(t, err, tc.err)
+				require.Equal(t, tc.want, state)
+			})
+		}
+
+		t.Run("trailing bytes and ownership", func(t *testing.T) {
+			for _, size := range []int{0, 3} {
+				buf, err := encode(pushPullMsg, pushPullHeader{UserStateLen: size}, false)
+				require.NoError(t, err)
+				buf = append(buf, []byte("abc")[:size]...)
+				buf = append(buf, "tail"...)
+				reader := bytes.NewReader(buf[1:])
+				dec := codec.NewDecoder(reader, &codec.MsgpackHandle{})
+				_, _, state, err := m.readRemoteState(reader, dec)
+				require.NoError(t, err)
+				trailing, err := io.ReadAll(reader)
+				require.NoError(t, err)
+				require.Equal(t, "tail", string(trailing))
+				clear(buf)
+				if size == 0 {
+					require.Nil(t, state)
+				} else {
+					require.Equal(t, "abc", string(state))
+				}
+			}
+		})
+
+		t.Run("plaintext above decompression limit", func(t *testing.T) {
+			state := bytes.Repeat([]byte{'s'}, maxDecompressedBytes+1)
+			buf, err := encode(pushPullMsg, pushPullHeader{UserStateLen: len(state)}, false)
+			require.NoError(t, err)
+			reader := io.MultiReader(bytes.NewReader(buf[1:]), bytes.NewReader(state))
+			dec := codec.NewDecoder(reader, &codec.MsgpackHandle{})
+			_, _, got, err := m.readRemoteState(reader, dec)
+			require.NoError(t, err)
+			require.True(t, bytes.Equal(state, got), "delegate state changed")
+		})
+	})
+}
+
+func TestReadUserMsg_Limit(t *testing.T) {
+	t.Run("negative length", func(t *testing.T) {
+		buf, err := encode(userMsg, userMsgHeader{UserMsgLen: -1}, false)
+		require.NoError(t, err)
+		reader := bytes.NewReader(buf[1:])
+		dec := codec.NewDecoder(reader, &codec.MsgpackHandle{})
+		m := &Memberlist{}
+		require.ErrorContains(t, m.readUserMsg(reader, dec), "exceeds limit")
+	})
+
+	mockNet := &MockNetwork{}
+	tr := mockNet.NewTransport("node")
+	logs := &bytes.Buffer{}
+	logger := log.New(logs, "", 0)
+
+	m := GetMemberlist(t, func(c *Config) {
+		c.EnableCompression = false
+		c.Logger = logger
+		c.Transport = tr
+		c.BindAddr = "127.0.0.1"
+		c.BindPort = 1
+	})
+	t.Cleanup(func() { _ = m.Shutdown() })
+
+	addr := joinHostPort(m.config.BindAddr, uint16(m.config.BindPort))
+
+	msg := userMsgHeader{UserMsgLen: 30_000_000}
+	buf, err := encode(userMsg, msg, m.config.MsgpackUseNewTimeFormat)
+	require.NoError(t, err)
+
+	conn, err := tr.DialTimeout(addr, time.Millisecond*100)
+	require.NoError(t, err)
+
+	err = m.rawSendMsgStream(conn, buf, "")
+	require.NoError(t, err)
+
+	// conn closed: get nothing back
+	var out []byte
+	_, err = conn.Read(out)
+	require.ErrorContains(t, err, "EOF")
+	require.Contains(t, logs.String(),
+		"user message length (30000000) exceeds limit")
 }
 
 func TestHandleConn_NilConnAfterRemoveLabelHeaderFromStream(t *testing.T) {

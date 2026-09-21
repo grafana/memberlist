@@ -18,6 +18,32 @@ import (
 )
 
 func TestCompressDecompress(t *testing.T) {
+	t.Run("decompressed size limit", func(t *testing.T) {
+		if testing.Short() {
+			t.Skip("allocates payloads up to the decompression limit")
+		}
+		for _, typ := range []compressionType{lzwCompressionType, snappyCompressionType} {
+			t.Run(compressionTypeLabel(typ), func(t *testing.T) {
+				for _, size := range []int{maxPushStateBytes + 1<<20 + 1, maxDecompressedBytes, maxDecompressedBytes + 1} {
+					t.Run(fmt.Sprint(size), func(t *testing.T) {
+						input := bytes.Repeat([]byte{'A'}, size)
+						buf, err := compressPayload(typ, input, false)
+						require.NoError(t, err)
+						gotType, decoded, err := decompressPayload(buf[1:])
+						require.Equal(t, typ, gotType)
+						if size > maxDecompressedBytes {
+							require.Error(t, err)
+							require.Nil(t, decoded)
+							return
+						}
+						require.NoError(t, err)
+						require.Equal(t, input, decoded)
+					})
+				}
+			})
+		}
+	})
+
 	t.Run("roundtrip", func(t *testing.T) {
 		types := []compressionType{lzwCompressionType, snappyCompressionType}
 		sizes := []int{0, 1, 100, 100 * 1024, 1024 * 1024}
@@ -204,19 +230,19 @@ func TestDecompressErrors(t *testing.T) {
 		// assert the decoder refuses to return more than the limit. LZW
 		// on a stream of identical bytes achieves ~1000:1 compression,
 		// so (cap+1) bytes of 'A' compresses down to a few KiB. The
-		// test allocates ~21 MiB of plaintext; gated by testing.Short.
+		// test allocates ~40 MiB of plaintext; gated by testing.Short.
 		t.Run("lzw", func(t *testing.T) {
 			if testing.Short() {
-				t.Skip("allocates ~21 MiB of plaintext; skipping under -short")
+				t.Skip("allocates ~40 MiB of plaintext; skipping under -short")
 			}
-			plain := bytes.Repeat([]byte{'A'}, maxDecompressBytes+1)
+			plain := bytes.Repeat([]byte{'A'}, maxDecompressedBytes+1)
 			buf, err := lzwCompress(plain)
 			require.NoError(t, err)
 			compressed := append([]byte(nil), buf.Bytes()...)
 			releaseLZWBuffer(buf)
 
 			_, err = lzwDecompress(compressed)
-			require.EqualError(t, err, fmt.Sprintf("memberlist: LZW-decompressed payload exceeds %d bytes", maxDecompressBytes))
+			require.EqualError(t, err, fmt.Sprintf("memberlist: LZW-decompressed payload exceeds %d bytes", maxDecompressedBytes))
 		})
 
 		// Snappy carries a varint-encoded decoded length at the start
@@ -227,10 +253,10 @@ func TestDecompressErrors(t *testing.T) {
 		// since the cap check fires on snappy.DecodedLen alone.
 		t.Run("snappy", func(t *testing.T) {
 			var hdr [binary.MaxVarintLen64]byte
-			n := binary.PutUvarint(hdr[:], maxDecompressBytes+1)
+			n := binary.PutUvarint(hdr[:], maxDecompressedBytes+1)
 
 			_, err := snappyDecompress(hdr[:n])
-			require.EqualError(t, err, fmt.Sprintf("memberlist: snappy-decompressed payload would exceed %d bytes (claimed %d)", maxDecompressBytes, maxDecompressBytes+1))
+			require.EqualError(t, err, fmt.Sprintf("memberlist: snappy-decompressed payload would exceed %d bytes (claimed %d)", maxDecompressedBytes, maxDecompressedBytes+1))
 		})
 	})
 
@@ -323,7 +349,7 @@ func TestMemberlistCompression(t *testing.T) {
 		num, err := m2.Join([]string{m1.config.Name + "/" + m1.config.BindAddr})
 		require.NoError(t, err)
 		require.Equal(t, 1, num)
-		require.Equal(t, 2, len(m2.Members()))
+		waitUntilSize(t, m2, 2)
 	})
 
 	t.Run("mixed rollout", func(t *testing.T) {
@@ -345,8 +371,8 @@ func TestMemberlistCompression(t *testing.T) {
 		num, err := m2.Join([]string{m1.config.Name + "/" + m1.config.BindAddr})
 		require.NoError(t, err)
 		require.Equal(t, 1, num)
-		require.Equal(t, 2, len(m2.Members()))
-		require.Equal(t, 2, len(m1.Members()))
+		waitUntilSize(t, m2, 2)
+		waitUntilSize(t, m1, 2)
 	})
 }
 

@@ -122,7 +122,7 @@ func lzwDecompress(src []byte) ([]byte, error) {
 	// doesn't escape across that boundary. Net cost: +1 alloc/op (24 B)
 	// per LZW decompress vs. an unbounded io.Copy — the price of bomb
 	// defense. See BenchmarkDecompressBuffer for numbers.
-	lr := io.LimitedReader{R: r, N: maxDecompressBytes + 1}
+	lr := io.LimitedReader{R: r, N: maxDecompressedBytes + 1}
 
 	var buf bytes.Buffer
 	if _, err := io.Copy(&buf, &lr); err != nil {
@@ -130,8 +130,8 @@ func lzwDecompress(src []byte) ([]byte, error) {
 		return nil, fmt.Errorf("lzwDecompress: read from src: %w", err)
 	}
 	_ = r.Close()
-	if buf.Len() > maxDecompressBytes {
-		return nil, fmt.Errorf("memberlist: LZW-decompressed payload exceeds %d bytes", maxDecompressBytes)
+	if buf.Len() > maxDecompressedBytes {
+		return nil, fmt.Errorf("memberlist: LZW-decompressed payload exceeds %d bytes", maxDecompressedBytes)
 	}
 	// Clone tightens the returned slice. io.Copy filled buf via growth-
 	// doubling, so buf.Bytes() typically has 25-50 % unused capacity that

@@ -1,4 +1,4 @@
-// Copyright (c) HashiCorp, Inc.
+// Copyright IBM Corp. 2013, 2026
 // SPDX-License-Identifier: MPL-2.0
 
 package memberlist
@@ -10,6 +10,20 @@ import (
 	"github.com/google/btree"
 	"github.com/stretchr/testify/require"
 )
+
+// for testing only
+func (q *TransmitLimitedQueue) orderedView() []*limitedBroadcast {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	out := make([]*limitedBroadcast, 0, q.lenLocked())
+	q.walkReadOnlyLocked(true, func(cur *limitedBroadcast) bool {
+		out = append(out, cur)
+		return true
+	})
+
+	return out
+}
 
 func TestLimitedBroadcastLess(t *testing.T) {
 	cases := []struct {
@@ -67,7 +81,7 @@ func TestTransmitLimited_Queue(t *testing.T) {
 	if q.NumQueued() != 3 {
 		t.Fatalf("bad len")
 	}
-	dump := q.orderedView(true)
+	dump := q.orderedView()
 	if dump[0].b.(*memberlistBroadcast).node != "test" {
 		t.Fatalf("missing test")
 	}
@@ -84,7 +98,7 @@ func TestTransmitLimited_Queue(t *testing.T) {
 	if q.NumQueued() != 3 {
 		t.Fatalf("bad len")
 	}
-	dump = q.orderedView(true)
+	dump = q.orderedView()
 	if dump[0].b.(*memberlistBroadcast).node != "foo" {
 		t.Fatalf("missing foo")
 	}
@@ -183,7 +197,7 @@ func TestTransmitLimited_Prune(t *testing.T) {
 		t.Fatalf("expected invalidation")
 	}
 
-	dump := q.orderedView(true)
+	dump := q.orderedView()
 
 	if dump[0].b.(*memberlistBroadcast).node != "bar" {
 		t.Fatalf("missing bar")
@@ -206,7 +220,7 @@ func TestTransmitLimited_ordering(t *testing.T) {
 	insert("node3", 4)
 	insert("node4", 7)
 
-	dump := q.orderedView(true)
+	dump := q.orderedView()
 
 	if dump[0].transmits != 10 {
 		t.Fatalf("bad val %v, %d", dump[0].b.(*memberlistBroadcast).node, dump[0].transmits)
