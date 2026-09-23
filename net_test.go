@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math/rand"
 	"net"
 	"reflect"
 	"strconv"
@@ -785,6 +786,154 @@ func TestEncryptDecryptState(t *testing.T) {
 	if !reflect.DeepEqual(state, plain) {
 		t.Fatalf("Decrypt failed: %v", plain)
 	}
+
+	t.Run("size limits", func(t *testing.T) {
+		for _, tc := range []struct {
+			name     string
+			protocol uint8
+			input    int
+			body     int
+		}{
+			{"v0 largest", 1, maxPushStateBytes - 33, maxPushStateBytes - 3},
+			{"v0 first rejected", 1, maxPushStateBytes - 32, 0},
+			{"v1 exact limit", 2, maxPushStateBytes - 29, maxPushStateBytes},
+			{"v1 first rejected", 2, maxPushStateBytes - 28, 0},
+			{"input above limit", 2, maxPushStateBytes + 1, 0},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				keys, err := NewKeyring(nil, []byte("0123456789abcdef"))
+				require.NoError(t, err)
+				cfg := DefaultLANConfig()
+				cfg.ProtocolVersion = tc.protocol
+				cfg.Keyring = keys
+				m := &Memberlist{config: cfg, logger: log.New(io.Discard, "", 0)}
+				input := bytes.Repeat([]byte{'s'}, tc.input)
+				label := strings.Repeat("l", LabelMaxSize)
+				frame, err := m.encryptLocalState(input, label)
+				if tc.body == 0 {
+					require.ErrorContains(t, err, "exceeds limit")
+					require.Nil(t, frame)
+					return
+				}
+				require.NoError(t, err)
+				require.Equal(t, tc.body, len(frame)-5)
+				require.Equal(t, uint32(tc.body), binary.BigEndian.Uint32(frame[1:5]))
+				plain, err := m.decryptRemoteState(bytes.NewReader(frame[1:]), label)
+				require.NoError(t, err)
+				require.True(t, bytes.Equal(input, plain), "decrypted state changed")
+			})
+		}
+	})
+}
+
+func TestRawSendMsgStream_EncryptedSize(t *testing.T) {
+	compressible := bytes.Repeat([]byte{'s'}, maxPushStateBytes+1)
+	incompressible := make([]byte, len(compressible))
+	_, err := rand.New(rand.NewSource(1)).Read(incompressible)
+	require.NoError(t, err)
+	for _, tc := range []struct {
+		name      string
+		algo      CompressionAlgorithm
+		input     []byte
+		noKey     bool
+		noVerify  bool
+		wantError bool
+	}{
+		{name: "uncompressed", input: compressible, wantError: true},
+		{name: "lzw compressed", algo: CompressionAlgorithmLZW, input: compressible},
+		{name: "snappy compressed", algo: CompressionAlgorithmSnappy, input: compressible},
+		{name: "lzw skipped", algo: CompressionAlgorithmLZW, input: incompressible, wantError: true},
+		{name: "snappy skipped", algo: CompressionAlgorithmSnappy, input: incompressible, wantError: true},
+		{name: "outgoing verification disabled", input: compressible, noVerify: true},
+		{name: "no key", input: compressible, noKey: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			network := &MockNetwork{}
+			m := GetMemberlist(t, func(c *Config) {
+				c.Transport = network.NewTransport("sender")
+				c.Logger = log.New(io.Discard, "", 0)
+				c.EnableCompression = tc.algo != ""
+				c.CompressionAlgorithm = tc.algo
+				if !tc.noKey {
+					c.SecretKey = []byte("0123456789abcdef")
+				}
+				c.GossipVerifyOutgoing = !tc.noVerify
+			})
+			t.Cleanup(func() { require.NoError(t, m.Shutdown()) })
+			conn := &encryptedSizeTestConn{}
+			err := m.rawSendMsgStream(conn, tc.input, "stream-label")
+			if tc.wantError {
+				require.ErrorContains(t, err, "exceeds limit")
+				require.Zero(t, conn.writes)
+				require.Zero(t, conn.Len())
+				return
+			}
+			require.NoError(t, err)
+			if tc.noKey || tc.noVerify {
+				require.True(t, bytes.Equal(tc.input, conn.Bytes()), "plaintext changed")
+				return
+			}
+			frame := conn.Bytes()
+			require.LessOrEqual(t, len(frame)-5, maxPushStateBytes)
+			plain, err := m.decryptRemoteState(bytes.NewReader(frame[1:]), "stream-label")
+			require.NoError(t, err)
+			require.Equal(t, byte(compressMsg), plain[0])
+			algo, decoded, err := decompressPayload(plain[1:])
+			require.NoError(t, err)
+			require.Equal(t, string(tc.algo), compressionTypeLabel(algo))
+			require.True(t, bytes.Equal(tc.input, decoded), "decompressed payload changed")
+		})
+	}
+
+	t.Run("SendReliable returns error after label only", func(t *testing.T) {
+		network := &MockNetwork{}
+		conn := &encryptedSizeTestConn{}
+		transport := &encryptedSizeTestTransport{NodeAwareTransport: network.NewTransport("sender"), conn: conn}
+		m := GetMemberlist(t, func(c *Config) {
+			c.Transport = transport
+			c.Logger = log.New(io.Discard, "", 0)
+			c.EnableCompression = false
+			c.SecretKey = []byte("0123456789abcdef")
+			c.Label = "stream-label"
+		})
+		t.Cleanup(func() { require.NoError(t, m.Shutdown()) })
+		node := &Node{Name: "receiver", Addr: net.IPv4(127, 0, 0, 1), Port: 1}
+		err := m.SendReliable(node, compressible[:maxPushStateBytes])
+		require.ErrorContains(t, err, "exceeds limit")
+		require.Equal(t, makeLabelHeader(m.config.Label, nil), conn.Bytes())
+		require.Equal(t, 1, conn.writes)
+		require.True(t, conn.closed)
+	})
+}
+
+type encryptedSizeTestConn struct {
+	net.Conn
+	bytes.Buffer
+	writes int
+	closed bool
+}
+
+func (c *encryptedSizeTestConn) Read(b []byte) (int, error) {
+	return c.Buffer.Read(b)
+}
+
+func (c *encryptedSizeTestConn) Write(b []byte) (int, error) {
+	c.writes++
+	return c.Buffer.Write(b)
+}
+
+func (c *encryptedSizeTestConn) Close() error {
+	c.closed = true
+	return nil
+}
+
+type encryptedSizeTestTransport struct {
+	NodeAwareTransport
+	conn net.Conn
+}
+
+func (t *encryptedSizeTestTransport) DialAddressTimeout(Address, time.Duration) (net.Conn, error) {
+	return t.conn, nil
 }
 
 func TestRawSendUdp_CRC(t *testing.T) {

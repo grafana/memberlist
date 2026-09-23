@@ -626,8 +626,9 @@ func (m *Memberlist) SendBestEffort(to *Node, msg []byte) error {
 
 // SendReliable uses the reliable stream-oriented interface of the transport to
 // target a user message at the given node (this does not use the gossip
-// mechanism). Delivery is guaranteed if no error is returned, and there is no
-// limit on the size of the message.
+// mechanism). Encrypted stream bodies are limited to 20 MiB after compression
+// and encryption. A nil error means the message was written to the transport;
+// it does not acknowledge delivery to the remote delegate.
 func (m *Memberlist) SendReliable(to *Node, msg []byte) error {
 	return m.sendUserMsg(to.FullAddress(), msg)
 }

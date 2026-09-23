@@ -42,4 +42,8 @@
 
 ### Fixed
 
+- Reject encrypted stream messages whose body exceeds the existing 20 MiB
+  receiver limit, including encryption overhead and padding, before writing
+  the encrypted frame. The size check applies after optional compression.
+
 ### Security
