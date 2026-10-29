@@ -1,6 +1,6 @@
 module github.com/hashicorp/memberlist
 
-go 1.25
+go 1.25.0
 
 require (
 	github.com/golang/snappy v1.0.0
@@ -24,6 +24,6 @@ require (
 	golang.org/x/crypto v0.32.0 // indirect
 	golang.org/x/net v0.34.0 // indirect
 	golang.org/x/sync v0.0.0-20190911185100-cd5d95a43a6e // indirect
-	golang.org/x/sys v0.35.0 // indirect
+	golang.org/x/sys v0.44.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
